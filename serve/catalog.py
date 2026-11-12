@@ -71,22 +71,28 @@ def _t4_chat(**kwargs) -> ModelSpec:
 
 PRESETS: tuple[ModelSpec, ...] = (
     _t4_chat(
-        key="qwen3.8-27b-awq",
-        label="Qwen3.8 27B (AWQ INT4)",
-        repo="cyankiwi/Qwen3.8-27B-AWQ-INT4",
+        key="qwen3.8-27b-gptq",
+        label="Qwen3.8 27B (GPTQ INT4)",
+        repo="btbtyler09/Qwen3.8-27B-GPTQ-4bit",
         kind="chat",
         engine="vllm",
-        size_gb=21.0,
+        size_gb=21.02,
         min_vram_gb=28.0,
         tensor_parallel=2,
         max_model_len=16384,
         gpu_memory_utilization=0.9,
-        extra_args=["--enforce-eager"],
-        local_paths=["/kaggle/input/qwen3-8-27b-awq-int4"],
+        extra_args=[
+            "--enforce-eager",
+            "--skip-mm-profiling",
+            "--limit-mm-per-prompt",
+            '{"image": 2}',
+        ],
+        local_paths=["/kaggle/input/qwen3-8-27b-gptq-4bit"],
         notes=(
             "21 GB of weights: it does not fit in Kaggle's 20 GB working disk. "
             "Attach it as a Kaggle Dataset (auto-detected under /kaggle/input) "
-            "or it will refuse to download."
+            "or it will refuse to download. GPTQ 4-bit group size 32 without "
+            "act-order is supported on Turing; vLLM selects the GPTQ kernel."
         ),
     ),
     _t4_chat(

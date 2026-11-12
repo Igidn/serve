@@ -12,7 +12,7 @@ def test_every_preset_is_valid() -> None:
 
 def test_chat_command_carries_t4_settings(monkeypatch) -> None:
     monkeypatch.setattr("serve.catalog.shutil.which", lambda name: "/usr/local/bin/vllm")
-    spec = next(s for s in PRESETS if s.key == "qwen3.8-27b-awq")
+    spec = next(s for s in PRESETS if s.key == "qwen3.8-27b-gptq")
     argv = build_argv(spec, "some/path", 8001, python="/usr/bin/python3")
     joined = " ".join(argv)
 
@@ -20,7 +20,7 @@ def test_chat_command_carries_t4_settings(monkeypatch) -> None:
     assert "--tensor-parallel-size 2" in joined
     assert "--dtype float16" in joined
     assert "--max-model-len 16384" in joined
-    assert "--served-model-name qwen3.8-27b-awq" in joined
+    assert "--served-model-name qwen3.8-27b-gptq" in joined
     assert "--enforce-eager" in argv
     assert "--omni" not in argv
 

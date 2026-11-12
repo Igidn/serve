@@ -30,16 +30,19 @@ Everything lives under `/kaggle/working/serve-state` while the run lasts.
 
 Two T4s give 32 GB of VRAM and **no bf16 or FP8**. Models must run in float16,
 so the 27B needs a 4-bit checkpoint. The preset uses
-`cyankiwi/Qwen3.8-27B-AWQ-INT4` with tensor parallelism 2.
+`btbtyler09/Qwen3.8-27B-GPTQ-4bit` with tensor parallelism 2. GPTQ is
+supported on Turing (compute capability 7.5), and this checkpoint uses group
+size 32 without act-order, so vLLM can pick a compatible GPTQ kernel.
 
 That checkpoint is **21 GB on disk**, and Kaggle's working disk is about
-**20 GB total** — including the vLLM install. It cannot be downloaded inside
-the kernel. Mount it as a Kaggle Dataset instead: `/kaggle/input` is read-only
-and does not consume the working disk. `scripts/upload_model_dataset.sh`
-prepares and uploads such a dataset from a machine with enough disk.
+**20 GB**. It cannot be downloaded inside the kernel. Mount it as a Kaggle
+Dataset instead: `/kaggle/input` is read-only and does not consume the working
+disk. `scripts/upload_model_dataset.sh` prepares and uploads such a dataset
+from a machine with enough disk.
 
-The gateway auto-detects a mounted model by folder name, so after attaching the
-dataset to the kernel it shows up as available and loads without a download.
+The kernel metadata pins that dataset, so it is mounted automatically at boot.
+The gateway detects it under `/kaggle/input` by folder name and loads it
+without a download.
 
 If you just want to check that the tunnel and API work, load `qwen3-8b-awq`
 (5.6 GB). It fits comfortably and downloads inside the kernel.
@@ -72,8 +75,8 @@ the engine log tab; the text models are unaffected.
    git push origin main
    ```
 
-2. Push the kernel (the id is already set to
-   `katherinameyerkat/serve-gpu-gateway`):
+2. Push the kernel. The id, T4 shape and the 27B dataset source are already
+   hardcoded in `.kaggle/`:
 
    ```bash
    kaggle kernels push -p .kaggle/
@@ -116,7 +119,7 @@ anywhere public.
 
 ## Using the API
 
-The model name is the preset key (`qwen3.8-27b-awq`, `sdxl-base`, …). When no
+The model name is the preset key (`qwen3.8-27b-gptq`, `sdxl-base`, …). When no
 model is loaded, `/v1/*` returns a JSON 503 instead of hanging.
 
 ```bash
@@ -127,7 +130,7 @@ curl $BASE/v1/models
 curl $BASE/v1/chat/completions \
   -H 'content-type: application/json' \
   -d '{
-    "model": "qwen3.8-27b-awq",
+    "model": "qwen3.8-27b-gptq",
     "messages": [{"role": "user", "content": "hello"}],
     "stream": true
   }'
@@ -201,7 +204,7 @@ behaviour.
 
 ```bash
 # on a machine with ~25 GB free; needs the Kaggle CLI and huggingface_hub
-./scripts/upload_model_dataset.sh cyankiwi/Qwen3.8-27B-AWQ-INT4
+./scripts/upload_model_dataset.sh btbtyler09/Qwen3.8-27B-GPTQ-4bit
 ```
 
 The script:
@@ -210,7 +213,7 @@ The script:
 2. downloads the snapshot into `./.model-datasets/<slug>` (override with
    `--workdir`),
 3. writes `dataset-metadata.json` using your Kaggle username and the slug the
-   preset expects (`qwen3-8-27b-awq-int4`), and
+   preset expects (`qwen3-8-27b-gptq-4bit`), and
 4. runs `kaggle datasets create --dir-mode zip`, or `datasets version` when the
    dataset already exists, then waits for it to become ready.
 
@@ -219,17 +222,16 @@ afterwards, and `--skip-space-check` only when the size lookup fails. A
 `HUGGINGFACE_TOKEN` or `HF_TOKEN` environment variable is used for gated
 repos.
 
-Then add the dataset to the kernel's `dataset_sources` (Kaggle UI → Add Data,
-or `.kaggle/kernel-metadata.json`). The gateway finds it under `/kaggle/input`
-and uses it in place:
+The 27B dataset is already pinned in `.kaggle/kernel-metadata.json`, so the
+kernel mounts it automatically:
 
 ```json
-"dataset_sources": ["katherinameyerkat/qwen3-8-27b-awq-int4"]
+"dataset_sources": ["katherinameyerkat/qwen3-8-27b-gptq-4bit"]
 ```
 
-The same trick works for any model that is bigger than the working disk. Keep
-the derived slug, or update the model's `local_paths` when you choose a custom
-one.
+The gateway finds it under `/kaggle/input` and uses it in place. To use a
+different model, upload it, update `dataset_sources`, and keep the derived slug
+in the model's `local_paths`.
 
 ## Layout
 

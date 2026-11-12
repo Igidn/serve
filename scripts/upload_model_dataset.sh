@@ -257,7 +257,9 @@ fi
 ATTEMPTS=$(( WAIT_TIMEOUT / 10 ))
 STATUS=""
 for ((i = 0; i < ATTEMPTS; i++)); do
-  STATUS="$(kaggle datasets status "$ID" 2>/dev/null | tr -d '[:space:]' || true)"
+  # The CLI prints its "outdated version" warning on stdout before the status,
+  # so only the last line is the real answer.
+  STATUS="$(kaggle datasets status "$ID" 2>/dev/null | tail -n 1 | tr -d '[:space:]' || true)"
   case "$STATUS" in
     ready|Ready|READY) break ;;
     failed|Failed|FAILED|error|Error|ERROR)

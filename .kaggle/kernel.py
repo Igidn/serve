@@ -12,9 +12,11 @@ import os
 import subprocess
 import sys
 
-REPO_URL = os.environ.get("SERVE_REPO_URL", "https://github.com/Igidn/serve.git")
-BRANCH = os.environ.get("SERVE_REPO_BRANCH", "main")
+REPO_URL = "https://github.com/Igidn/serve.git"
+BRANCH = "main"
 WORK = "/kaggle/working/serve"
+MODEL_DATASET = "katherinameyerkat/qwen3-8-27b-gptq-4bit"
+MODEL_MOUNT = "/kaggle/input/qwen3-8-27b-gptq-4bit"
 
 
 def run(argv: list[str], **kwargs) -> None:
@@ -49,6 +51,13 @@ def main() -> None:
     clone()
     os.chdir(WORK)
     sys.path.insert(0, WORK)
+
+    mounted = os.path.isfile(os.path.join(MODEL_MOUNT, "config.json"))
+    print(
+        f"model dataset {MODEL_DATASET}: "
+        f"{'mounted at ' + MODEL_MOUNT if mounted else 'NOT mounted'}",
+        flush=True,
+    )
 
     run(
         [
