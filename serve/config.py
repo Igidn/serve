@@ -67,6 +67,7 @@ class Config:
     tunnel_identity: str | None
     allow_exit: bool
     max_model_len_cap: int
+    stage_models: bool
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -94,6 +95,7 @@ class Config:
             or None,
             allow_exit=_bool("SERVE_ALLOW_EXIT", on_kaggle),
             max_model_len_cap=_int("SERVE_MAX_MODEL_LEN", 32768),
+            stage_models=_bool("SERVE_STAGE_MODELS", True),
         )
 
     # -- derived paths -----------------------------------------------------

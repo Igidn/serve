@@ -5,6 +5,7 @@ import shutil
 from pathlib import Path
 from typing import Any
 
+from . import staging
 from .catalog import Catalog, ModelSpec
 from .config import Config
 from .util import dir_size, exception_summary, human_bytes, now, one_line
@@ -264,6 +265,8 @@ class ModelManager:
                     self._set_progress,
                 )
                 source, local = self.catalog.source_for(spec, self.cfg.models_dir)
+            elif self.cfg.stage_models and staging.is_network_mount(local):
+                source, local = await self._stage_weights(spec, local)
             else:
                 self.stage = f"using local weights at {local}"
 
@@ -313,6 +316,47 @@ class ModelManager:
         self.bytes_total = total
         if total:
             self.progress = min(1.0, done / total)
+
+    async def _stage_weights(self, spec: ModelSpec, local: Path) -> tuple[str, Path]:
+        """Copy weights off a network mount so the engine reads local disk."""
+        dest = self.catalog.download_dir(spec, self.cfg.models_dir)
+        files = staging.checkpoint_files(local)
+        need = staging.total_bytes(files)
+        if staging.ready(dest):
+            self.log.info("reusing staged weights at %s", dest)
+        else:
+            free = shutil.disk_usage(self.cfg.state_dir).free
+            if need and free < need * 1.02:
+                self.log.warning(
+                    "cannot stage %s: needs %s, %s free; loading from %s",
+                    spec.key,
+                    human_bytes(need),
+                    human_bytes(free),
+                    local,
+                )
+                self.stage = f"using local weights at {local}"
+                return str(local), local
+            self.stage = f"copying {human_bytes(need)} to local disk"
+            self.log.info("staging %s: %s → %s (%s)", spec.key, local, dest, human_bytes(need))
+            self._set_progress(0, need or None)
+            started = now()
+            try:
+                await asyncio.to_thread(staging.stage, local, dest, self._set_progress)
+            except (OSError, RuntimeError) as exc:
+                # A failed copy is not worth failing the load: the mount still
+                # works, it is only slower.
+                self.log.warning("staging %s failed: %s", spec.key, exc)
+                self.progress = None
+                self.bytes_done = 0
+                self.bytes_total = None
+                self.stage = f"using local weights at {local}"
+                return str(local), local
+            self.log.info("staged %s in %.0fs", spec.key, now() - started)
+        self.progress = None
+        self.bytes_done = 0
+        self.bytes_total = None
+        self.stage = f"using staged weights at {dest}"
+        return str(dest), dest
 
     # -- reporting ---------------------------------------------------------
 
