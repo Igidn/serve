@@ -8,6 +8,7 @@ from pathlib import Path
 
 import httpx
 
+from . import llamacpp
 from .config import Config
 from .util import tail
 
@@ -50,6 +51,9 @@ def engine_env(cfg: Config) -> dict[str, str]:
     if cfg.hf_token:
         env["HF_TOKEN"] = cfg.hf_token
         env["HUGGING_FACE_HUB_TOKEN"] = cfg.hf_token
+    # The llama.cpp archive ships its own libggml-* and the CUDA runtime, and
+    # the binary looks for them next to itself only sometimes; make it explicit.
+    env.update(llamacpp.runtime_env(cfg))
     return env
 
 

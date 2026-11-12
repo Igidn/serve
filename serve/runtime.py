@@ -9,11 +9,18 @@ from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 
+from . import llamacpp
 from .catalog import vllm_executable
 from .config import Config
 from .util import human_bytes, one_line
 
-PACKAGE_FOR_ENGINE = {"vllm": ("vllm",), "vllm-omni": ("vllm", "vllm-omni")}
+PACKAGE_FOR_ENGINE = {
+    "vllm": ("vllm",),
+    "vllm-omni": ("vllm", "vllm-omni"),
+    # llama.cpp is a downloaded binary, not a pip package, so it has no
+    # distribution version to look up.
+    "llamacpp": (),
+}
 
 # Import the modules the `vllm serve` CLI touches before it reads any config.
 # A version number on disk is not proof that the tree is importable: a stale
@@ -63,15 +70,25 @@ class RuntimeManager:
     # -- status ------------------------------------------------------------
 
     def status(self, engine: str) -> RuntimeState:
+        task = self._tasks.get(engine)
+        installing = bool(task and not task.done())
+        if engine == "llamacpp":
+            found = llamacpp.binary(self.cfg)
+            return RuntimeState(
+                engine=engine,
+                installed=bool(found),
+                version=self.cfg.llamacpp_build if found else None,
+                installing=installing,
+                error=self._errors.get(engine),
+            )
         packages = PACKAGE_FOR_ENGINE.get(engine, ())
         versions = {p: installed_version(p) for p in packages}
         installed = all(versions.values()) if versions else False
-        task = self._tasks.get(engine)
         return RuntimeState(
             engine=engine,
             installed=installed,
             version=versions.get("vllm-omni") or versions.get("vllm"),
-            installing=bool(task and not task.done()),
+            installing=installing,
             error=self._errors.get(engine),
         )
 
@@ -99,13 +116,34 @@ class RuntimeManager:
         await task
 
     async def prepare(self, engine: str) -> None:
-        """Make sure the engine's package is the pinned version *and* imports.
+        """Make sure the engine is installed *and* can actually start.
 
         Kaggle images ship their own vLLM, and a half-overwritten install still
         reports the new version number while some modules are old. Both cases
         end as ``engine exited with code 1`` inside ``import vllm``, so check
-        the import here where we can reinstall instead of guessing.
+        the import here where we can reinstall instead of guessing. For
+        llama.cpp the equivalent failure is a binary that cannot see CUDA.
         """
+        if engine == "llamacpp":
+            if llamacpp.binary(self.cfg) is None:
+                self._emit(f"llama.cpp {self.cfg.llamacpp_build} is missing; installing")
+                await self._ensure_install(engine)
+            if self._verified.get(engine) == self.cfg.llamacpp_build:
+                return
+            ok, output = await llamacpp.verify(self.cfg)
+            if not ok:
+                self._emit("llama.cpp cannot start; reinstalling the runtime")
+                await self._ensure_install(engine, reinstall=True)
+                ok, output = await llamacpp.verify(self.cfg)
+                if not ok:
+                    raise RuntimeError(
+                        f"llama.cpp {self.cfg.llamacpp_build} is installed but CUDA is not "
+                        "available:\n" + output
+                    )
+            self._verified[engine] = self.cfg.llamacpp_build
+            self._emit(f"llama.cpp check passed: {one_line(output, 200)}")
+            return
+
         want = self.cfg.omni_version if engine == "vllm-omni" else self.cfg.vllm_version
         have = installed_version("vllm")
         if have != want:
@@ -174,8 +212,14 @@ class RuntimeManager:
         self._errors.pop(engine, None)
         self._emit(f"preparing {engine}")
         try:
-            await self._ensure_uv()
             await self._check_space(engine)
+            if engine == "llamacpp":
+                if reinstall:
+                    shutil.rmtree(llamacpp.install_dir(self.cfg), ignore_errors=True)
+                found = await llamacpp.install(self.cfg, self._emit)
+                self._emit(f"llama.cpp {self.cfg.llamacpp_build} is ready at {found}")
+                return
+            await self._ensure_uv()
             steps = self._commands(engine, reinstall=reinstall)
             for argv in steps:
                 self._emit("$ " + " ".join(argv))
@@ -233,7 +277,7 @@ class RuntimeManager:
                 raise RuntimeError("uv was installed but is not on PATH")
 
     async def _check_space(self, engine: str) -> None:
-        need = 12 if engine == "vllm" else 17
+        need = {"vllm": 12, "vllm-omni": 17, "llamacpp": 2}[engine]
         free = shutil.disk_usage(self.cfg.state_dir).free
         if free < need * 1024**3:
             raise RuntimeError(

@@ -213,6 +213,7 @@ function modelTags(model, snapshot) {
   if (model.job && model.job.state === "error") tags.push(`<span class="tag err">download failed</span>`);
   if (model.tensor_parallel > 1) tags.push(`<span class="tag">tp=${model.tensor_parallel}</span>`);
   if (model.engine === "vllm-omni") tags.push(`<span class="tag">omni</span>`);
+  if (model.engine === "llamacpp") tags.push(`<span class="tag">gguf</span>`);
   if (snapshot.vram_total_gb > 0 && model.min_vram_gb > snapshot.vram_total_gb) {
     tags.push(`<span class="tag warn">needs ~${model.min_vram_gb} GB vram</span>`);
   }

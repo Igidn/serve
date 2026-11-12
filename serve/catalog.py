@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import sys
@@ -9,7 +10,7 @@ from pathlib import Path
 
 
 KINDS = ("chat", "image")
-ENGINES = ("vllm", "vllm-omni")
+ENGINES = ("vllm", "vllm-omni", "llamacpp")
 
 
 @dataclass
@@ -34,6 +35,10 @@ class ModelSpec:
     trust_remote_code: bool = False
     extra_args: list[str] = field(default_factory=list)
     local_paths: list[str] = field(default_factory=list)
+    # Globs selecting the files to download. Empty means "the whole repo minus
+    # the formats we never serve". GGUF repos ship every quantisation side by
+    # side, so an empty list there would pull hundreds of gigabytes.
+    files: list[str] = field(default_factory=list)
     min_vram_gb: float = 0.0
     notes: str = ""
     builtin: bool = True
@@ -61,6 +66,7 @@ class ModelSpec:
         spec.builtin = bool(data.get("builtin", False))
         spec.extra_args = [str(a) for a in (spec.extra_args or [])]
         spec.local_paths = [str(p) for p in (spec.local_paths or [])]
+        spec.files = [str(f) for f in (spec.files or [])]
         return spec.validate()
 
 
@@ -70,6 +76,28 @@ def _t4_chat(**kwargs) -> ModelSpec:
 
 
 PRESETS: tuple[ModelSpec, ...] = (
+    ModelSpec(
+        key="qwen3.8-27b-gguf",
+        label="Qwen3.8 27B (GGUF Q4_K_M)",
+        repo="unsloth/Qwen3.8-27B-GGUF",
+        kind="chat",
+        engine="llamacpp",
+        size_gb=17.49,
+        min_vram_gb=24.0,
+        tensor_parallel=2,
+        dtype=None,
+        max_model_len=131072,
+        # The repo carries 25 quantisations (300+ GB); fetch only this one and
+        # the vision projector.
+        files=["Qwen3.8-27B-UD-Q4_K_M.gguf", "mmproj-F16.gguf"],
+        notes=(
+            "llama.cpp instead of vLLM. 16.6 GB of weights plus the 0.9 GB "
+            "vision projector fit the 20 GB working disk and split across two "
+            "T4s, so no Kaggle Dataset and no 20 GB FUSE copy are needed. "
+            "Chat template and tool calls come from the GGUF metadata via "
+            "--jinja; the KV cache is quantised so a 128k context fits."
+        ),
+    ),
     _t4_chat(
         key="qwen3.8-27b-gptq",
         label="Qwen3.8 27B (GPTQ INT4)",
@@ -224,15 +252,28 @@ class Catalog:
     def local_source(self, spec: ModelSpec) -> Path | None:
         for raw in spec.local_paths:
             path = Path(raw)
-            if (path / "config.json").is_file():
+            if self.is_checkpoint(path, spec):
                 return path
-        return self._scan_kaggle_input(spec.repo)
+        return self._scan_kaggle_input(spec.repo, spec.engine)
 
     def download_dir(self, spec: ModelSpec, models_dir: Path) -> Path:
         return models_dir / spec.key
 
+    def cached(self, spec: ModelSpec, models_dir: Path) -> bool:
+        return self.is_checkpoint(self.download_dir(spec, models_dir), spec)
+
+    @staticmethod
+    def is_checkpoint(path: Path, spec: ModelSpec) -> bool:
+        """Whether ``path`` holds something this engine can load."""
+        try:
+            if spec.engine == "llamacpp":
+                return any(path.glob("*.gguf"))
+            return (path / "config.json").is_file()
+        except OSError:
+            return False
+
     def source_for(self, spec: ModelSpec, models_dir: Path) -> tuple[str, Path | None]:
-        """Return the value to hand to vLLM and, if local, its path.
+        """Return the value to hand to the engine and, if local, its path.
 
         A local/Kaggle-input copy wins over a downloaded one so attaching a
         dataset avoids the download entirely.
@@ -241,22 +282,28 @@ class Catalog:
         if local is not None:
             return str(local), local
         cached = self.download_dir(spec, models_dir)
-        if (cached / "config.json").is_file():
+        if self.is_checkpoint(cached, spec):
             return str(cached), cached
         return spec.repo, None
 
     @staticmethod
-    def _scan_kaggle_input(repo: str) -> Path | None:
+    def _scan_kaggle_input(repo: str, engine: str = "vllm") -> Path | None:
         root = Path("/kaggle/input")
         if not root.is_dir():
             return None
         wanted = _slug(repo.split("/", 1)[-1]).replace("qwen3-", "qwen3")
         flattened = _slug(repo)
-        for candidate in root.glob("*/"):
+
+        def usable(candidate: Path) -> bool:
             try:
-                if not (candidate / "config.json").is_file():
-                    continue
+                if engine == "llamacpp":
+                    return any(candidate.glob("*.gguf"))
+                return (candidate / "config.json").is_file()
             except OSError:
+                return False
+
+        for candidate in root.glob("*/"):
+            if not usable(candidate):
                 continue
             name = _slug(candidate.name)
             if name in {wanted, flattened} or wanted in name or name in wanted:
@@ -264,13 +311,10 @@ class Catalog:
         # Older kernels mount datasets at /kaggle/input/<slug>; newer ones use
         # /kaggle/input/datasets/<owner>/<slug>.
         for candidate in (*root.glob("*/*/"), *root.glob("datasets/*/*/")):
-            try:
-                if (candidate / "config.json").is_file():
-                    name = _slug(candidate.name)
-                    if wanted in name or name in wanted or flattened in _slug(str(candidate)):
-                        return candidate
-            except OSError:
-                continue
+            if usable(candidate):
+                name = _slug(candidate.name)
+                if wanted in name or name in wanted or flattened in _slug(str(candidate)):
+                    return candidate
         return None
 
 
@@ -281,7 +325,92 @@ def vllm_executable(python: str = sys.executable) -> str | None:
     return shutil.which("vllm")
 
 
-def build_argv(spec: ModelSpec, source: str, port: int, python: str = sys.executable) -> list[str]:
+def llamacpp_binary(state_dir: Path | str | None) -> str | None:
+    """The installed ``llama-server`` for the pinned build, if any."""
+    if state_dir is None:
+        return None
+    root = Path(state_dir) / "runtime" / "llamacpp"
+    if not root.is_dir():
+        return None
+    for path in sorted(root.rglob("llama-server")):
+        try:
+            if path.is_file() and os.access(path, os.X_OK):
+                return str(path)
+        except OSError:
+            continue
+    return None
+
+
+def llamacpp_checkpoint(source: Path) -> tuple[Path | None, Path | None]:
+    """Largest GGUF at ``source`` and its multimodal projector, if present."""
+    try:
+        files = [p for p in sorted(source.glob("*.gguf")) if p.is_file()]
+    except OSError:
+        return None, None
+    projector = next((p for p in files if "mmproj" in p.name.lower()), None)
+    weights = [p for p in files if p is not projector]
+    if not weights:
+        return None, projector
+    return max(weights, key=lambda p: p.stat().st_size), projector
+
+
+def _llamacpp_argv(
+    spec: ModelSpec, source: str, port: int, state_dir: Path | str | None
+) -> list[str]:
+    binary = llamacpp_binary(state_dir)
+    if not binary:
+        raise RuntimeError(
+            "llama.cpp is not installed yet; install the llamacpp runtime and load again"
+        )
+    model, projector = llamacpp_checkpoint(Path(source))
+    if model is None:
+        raise RuntimeError(f"no .gguf weights found under {source}")
+
+    argv = [
+        binary,
+        "--model",
+        str(model),
+        "--host",
+        "127.0.0.1",
+        "--port",
+        str(port),
+        "--alias",
+        spec.key,
+        "--jinja",
+        # One slot, so a single agent gets the whole window and the KV cache
+        # is reused across turns of the same conversation.
+        "--parallel",
+        "1",
+        "--n-gpu-layers",
+        "999",
+        "--split-mode",
+        "layer",
+    ]
+    if spec.tensor_parallel > 1:
+        argv += ["--tensor-split", ",".join(["1"] * spec.tensor_parallel)]
+    if spec.kind == "chat" and spec.max_model_len:
+        argv += ["--ctx-size", str(spec.max_model_len)]
+        # Keys quantise to 8 bits, values stay f16: that halves the cache
+        # without needing a flash-attention kernel that Turing may not have.
+        argv += ["--cache-type-k", "q8_0", "--cache-type-v", "f16"]
+        # The template turns thinking on by default at reasoning_effort=xhigh.
+        argv += ["--chat-template-kwargs", '{"enable_thinking": false}']
+    if projector is not None:
+        argv += ["--mmproj", str(projector)]
+    argv += list(spec.extra_args)
+    return argv
+
+
+def build_argv(
+    spec: ModelSpec,
+    source: str,
+    port: int,
+    python: str = sys.executable,
+    state_dir: Path | str | None = None,
+) -> list[str]:
+    if spec.engine == "llamacpp":
+        return _llamacpp_argv(spec, source, port, state_dir)
+
     executable = vllm_executable(python)
     if executable:
         argv = [executable, "serve", source]

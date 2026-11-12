@@ -53,6 +53,53 @@ def test_unknown_engine_is_rejected() -> None:
         ).validate()
 
 
+def test_llamacpp_command_uses_the_gguf_and_jinja(tmp_path) -> None:
+    state = tmp_path / "serve-state"
+    binary = state / "runtime" / "llamacpp" / "b12318" / "build" / "bin" / "llama-server"
+    binary.parent.mkdir(parents=True)
+    binary.write_text("#!/bin/sh\n")
+    binary.chmod(0o755)
+
+    weights = tmp_path / "weights"
+    weights.mkdir()
+    (weights / "Qwen3.8-27B-UD-Q4_K_M.gguf").write_bytes(b"x" * 64)
+    (weights / "mmproj-F16.gguf").write_bytes(b"x" * 8)
+
+    spec = next(s for s in PRESETS if s.key == "qwen3.8-27b-gguf")
+    argv = build_argv(spec, str(weights), 8001, state_dir=state)
+
+    assert argv[0] == str(binary)
+    assert argv[argv.index("--model") + 1] == str(weights / "Qwen3.8-27B-UD-Q4_K_M.gguf")
+    assert argv[argv.index("--mmproj") + 1] == str(weights / "mmproj-F16.gguf")
+    assert argv[argv.index("--ctx-size") + 1] == "131072"
+    assert argv[argv.index("--tensor-split") + 1] == "1,1"
+    assert argv[argv.index("--alias") + 1] == "qwen3.8-27b-gguf"
+    assert argv[argv.index("--chat-template-kwargs") + 1] == '{"enable_thinking": false}'
+    assert "--jinja" in argv
+    assert "--served-model-name" not in argv
+
+
+def test_llamacpp_without_a_binary_explains_itself(tmp_path) -> None:
+    weights = tmp_path / "weights"
+    weights.mkdir()
+    (weights / "model.gguf").write_bytes(b"x")
+    spec = next(s for s in PRESETS if s.key == "qwen3.8-27b-gguf")
+    with pytest.raises(RuntimeError, match="not installed"):
+        build_argv(spec, str(weights), 8001, state_dir=tmp_path / "serve-state")
+
+
+def test_gguf_counts_as_a_checkpoint(tmp_path) -> None:
+    spec = next(s for s in PRESETS if s.key == "qwen3.8-27b-gguf")
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    assert Catalog.is_checkpoint(empty, spec) is False
+    (empty / "model.Q4_K_M.gguf").write_bytes(b"x")
+    assert Catalog.is_checkpoint(empty, spec) is True
+    # A Python checkpoint still needs config.json, not a stray .gguf.
+    vllm = next(s for s in PRESETS if s.key == "qwen3.8-27b-gptq")
+    assert Catalog.is_checkpoint(empty, vllm) is False
+
+
 def test_custom_models_round_trip(tmp_path) -> None:
     path = tmp_path / "custom.json"
     catalog = Catalog(path)

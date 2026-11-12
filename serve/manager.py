@@ -10,8 +10,6 @@ from .catalog import Catalog, ModelSpec
 from .config import Config
 from .util import dir_size, exception_summary, human_bytes, now, one_line
 
-GiB = 1024**3
-
 
 class InsufficientSpace(RuntimeError):
     def __init__(self, need: int, free: int):
@@ -24,13 +22,22 @@ class InsufficientSpace(RuntimeError):
         self.free = free
 
 
-def remote_size(repo: str, token: str | None) -> int | None:
-    """Total byte size of a HF repo, or None when it cannot be determined."""
+def remote_size(repo: str, token: str | None, patterns: list[str] | None = None) -> int | None:
+    """Byte size of the files a download will fetch, or None when unknown."""
+    import fnmatch
+
     try:
         from huggingface_hub import HfApi
 
         info = HfApi(token=token).model_info(repo, files_metadata=True)
-        sizes = [s.size for s in (info.siblings or []) if getattr(s, "size", None)]
+        sizes = []
+        for sibling in info.siblings or []:
+            size = getattr(sibling, "size", None)
+            if not size:
+                continue
+            if patterns and not any(fnmatch.fnmatch(sibling.rfilename, p) for p in patterns):
+                continue
+            sizes.append(size)
         return sum(sizes) if sizes else None
     except Exception:
         return None
@@ -44,12 +51,15 @@ async def download_snapshot(
     on_progress,
 ) -> Path:
     dest.mkdir(parents=True, exist_ok=True)
-    total = remote_size(spec.repo, cfg.hf_token)
+    patterns = list(spec.files) or None
+    total = remote_size(spec.repo, cfg.hf_token, patterns)
     if total:
         free = shutil.disk_usage(cfg.state_dir).free
-        # Hugging Face keeps temporary files and some repos ship extra formats.
-        if free < total * 1.12 + 1 * GiB:
-            raise InsufficientSpace(int(total * 1.12) + GiB, free)
+        # Hugging Face downloads into a temporary file inside the destination
+        # and renames it, so the peak is one copy of the selected files, not
+        # two. Keep a small margin for logs and the destination metadata.
+        if free < total * 1.03 + 512 * 1024**2:
+            raise InsufficientSpace(int(total * 1.03) + 512 * 1024**2, free)
         on_progress(0, total)
 
     stop = asyncio.Event()
@@ -72,16 +82,18 @@ async def download_snapshot(
             repo_id=spec.repo,
             local_dir=str(dest),
             token=cfg.hf_token,
-            ignore_patterns=["*.gguf", "*.onnx", "*.msgpack"],
+            allow_patterns=patterns,
+            ignore_patterns=None if patterns else ["*.gguf", "*.onnx", "*.msgpack"],
         )
     finally:
         stop.set()
         await poller
 
     on_progress(dir_size(dest), total)
-    if not (dest / "config.json").is_file():
+    if not Catalog.is_checkpoint(dest, spec):
+        expected = "a .gguf file" if spec.engine == "llamacpp" else "config.json"
         raise RuntimeError(
-            f"{spec.repo} was downloaded but has no config.json; it may not be a full checkpoint"
+            f"{spec.repo} was downloaded but has no {expected}; it may not be a full checkpoint"
         )
     return dest
 
@@ -265,7 +277,11 @@ class ModelManager:
                     self._set_progress,
                 )
                 source, local = self.catalog.source_for(spec, self.cfg.models_dir)
-            elif self.cfg.stage_models and staging.is_network_mount(local):
+            elif (
+                spec.engine != "llamacpp"
+                and self.cfg.stage_models
+                and staging.is_network_mount(local)
+            ):
                 source, local = await self._stage_weights(spec, local)
             else:
                 self.stage = f"using local weights at {local}"
@@ -277,7 +293,9 @@ class ModelManager:
             from .catalog import build_argv
             from .engine import EngineProcess
 
-            argv = build_argv(spec, source, self.cfg.engine_port)
+            argv = build_argv(
+                spec, source, self.cfg.engine_port, state_dir=self.cfg.state_dir
+            )
             self.stage = "starting engine"
             engine = EngineProcess(
                 self.cfg, self.cfg.engine_port, self.cfg.logs_dir / "engine.log", self.log
@@ -372,7 +390,7 @@ class ModelManager:
         for spec in self.catalog.all():
             local = self.catalog.local_source(spec)
             cached_dir = self.catalog.download_dir(spec, self.cfg.models_dir)
-            cached = (cached_dir / "config.json").is_file()
+            cached = self.catalog.cached(spec, self.cfg.models_dir)
             size = 0
             if cached:
                 stamp, value = self._sizes.get(spec.key, (0.0, 0))
