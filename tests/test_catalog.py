@@ -26,9 +26,8 @@ def test_chat_command_carries_t4_settings(monkeypatch) -> None:
     assert "--enable-auto-tool-choice" in argv
     assert argv[argv.index("--tool-call-parser") + 1] == "qwen3_xml"
     assert argv[argv.index("--reasoning-parser") + 1] == "qwen3"
-    assert argv[argv.index("--default-chat-template-kwargs") + 1] == (
-        '{"enable_thinking": false}'
-    )
+    # Thinking is on by default; a request can opt out per call.
+    assert "--default-chat-template-kwargs" not in argv
 
 
 def test_image_command_uses_omni_without_served_name(monkeypatch) -> None:
@@ -74,7 +73,8 @@ def test_llamacpp_command_uses_the_gguf_and_jinja(tmp_path) -> None:
     assert argv[argv.index("--ctx-size") + 1] == "131072"
     assert argv[argv.index("--tensor-split") + 1] == "1,1"
     assert argv[argv.index("--alias") + 1] == "qwen3.8-27b-gguf"
-    assert argv[argv.index("--chat-template-kwargs") + 1] == '{"enable_thinking": false}'
+    assert argv[argv.index("--chat-template-kwargs") + 1] == '{"enable_thinking": true}'
+    assert argv[argv.index("--reasoning-format") + 1] == "deepseek"
     assert "--jinja" in argv
     assert "--served-model-name" not in argv
 

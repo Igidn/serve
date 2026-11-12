@@ -121,11 +121,9 @@ PRESETS: tuple[ModelSpec, ...] = (
             "qwen3_xml",
             "--reasoning-parser",
             "qwen3",
-            # Thinking defaults to xhigh, which on two T4s means minutes of
-            # <think> before the first useful token. Agent harnesses want it
-            # off unless the request asks for it.
-            "--default-chat-template-kwargs",
-            '{"enable_thinking": false}',
+            # Thinking stays on: the template's reasoning_effort defaults to
+            # xhigh, and a request can turn it off with
+            # chat_template_kwargs={"enable_thinking": false}.
         ],
         local_paths=[
             "/kaggle/input/datasets/katherinameyerkat/qwen3-8-27b-gptq-4bit",
@@ -393,8 +391,17 @@ def _llamacpp_argv(
         # Keys quantise to 8 bits, values stay f16: that halves the cache
         # without needing a flash-attention kernel that Turing may not have.
         argv += ["--cache-type-k", "q8_0", "--cache-type-v", "f16"]
-        # The template turns thinking on by default at reasoning_effort=xhigh.
-        argv += ["--chat-template-kwargs", '{"enable_thinking": false}']
+    if spec.kind == "chat":
+        # Thinking is part of what this checkpoint is for, so leave it on (the
+        # template's own default) and put it in reasoning_content instead of
+        # inlining <think> in the answer. Per-request chat_template_kwargs can
+        # still set enable_thinking false or reasoning_effort low.
+        argv += [
+            "--reasoning-format",
+            "deepseek",
+            "--chat-template-kwargs",
+            '{"enable_thinking": true}',
+        ]
     if projector is not None:
         argv += ["--mmproj", str(projector)]
     argv += list(spec.extra_args)
