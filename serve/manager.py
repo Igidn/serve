@@ -7,7 +7,7 @@ from typing import Any
 
 from .catalog import Catalog, ModelSpec
 from .config import Config
-from .util import dir_size, human_bytes, now, one_line
+from .util import dir_size, exception_summary, human_bytes, now, one_line
 
 GiB = 1024**3
 
@@ -249,10 +249,7 @@ class ModelManager:
             self.bytes_total = None
 
             self.stage = f"preparing {spec.engine}"
-            state = self.runtime.status(spec.engine)
-            if not state.installed:
-                self.stage = f"installing {spec.engine}"
-                await self.runtime.ensure(spec.engine)
+            await self.runtime.prepare(spec.engine)
 
             self.stage = "locating model weights"
             source, local = self.catalog.source_for(spec, self.cfg.models_dir)
@@ -302,11 +299,11 @@ class ModelManager:
             self.active = None
             raise
         except Exception as exc:
-            message = one_line(str(exc), 800)
-            self.error = message
+            message = exception_summary(str(exc))
+            self.error = message or one_line(str(exc), 800)
             self.phase = "error"
             self.stage = ""
-            self.log.warning("load failed for %s: %s", spec.key, message)
+            self.log.warning("load failed for %s: %s", spec.key, self.error)
             if self.engine is not None:
                 await self.engine.stop()
             self.engine = None

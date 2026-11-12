@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import re
 import time
 from pathlib import Path
+
+_ERROR_LINE = re.compile(r"^[\w.]*(Error|Exception|Exit|Interrupt)\b\s*:")
 
 
 def now() -> float:
@@ -58,3 +61,20 @@ def dir_size(path: Path) -> int:
 def one_line(text: str, limit: int = 240) -> str:
     flat = " ".join(text.split())
     return flat[:limit] + ("…" if len(flat) > limit else "")
+
+
+def exception_summary(text: str, limit: int = 800) -> str:
+    """The useful line of a traceback: the exception, not its first frames.
+
+    Engine failures arrive as ``engine exited with code 1`` followed by the
+    tail of a traceback. Flattening that with :func:`one_line` keeps the top
+    frames and drops the ``ImportError``/``ModuleNotFoundError`` that says
+    what actually went wrong.
+    """
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if not lines:
+        return ""
+    for line in reversed(lines):
+        if _ERROR_LINE.match(line):
+            return line[:limit]
+    return lines[0][:limit]

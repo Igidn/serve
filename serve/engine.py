@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import os
 import signal
+import sys
 from pathlib import Path
 
 import httpx
@@ -13,6 +14,23 @@ from .util import tail
 
 class EngineCrash(RuntimeError):
     pass
+
+
+REPORT_PACKAGES = ("vllm", "torch", "transformers", "tokenizers", "pydantic", "numpy")
+
+
+def version_header() -> str:
+    """One log line with the versions that decide whether vLLM can import."""
+    import importlib.metadata
+
+    report = []
+    for package in REPORT_PACKAGES:
+        try:
+            report.append(f"{package}={importlib.metadata.version(package)}")
+        except importlib.metadata.PackageNotFoundError:
+            report.append(f"{package}=missing")
+    report.append(f"python={'.'.join(map(str, sys.version_info[:3]))}")
+    return " ".join(report)
 
 
 def engine_env(cfg: Config) -> dict[str, str]:
@@ -59,6 +77,7 @@ class EngineProcess:
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
         self._handle = self.log_path.open("wb", buffering=0)
         self._handle.write(("$ " + " ".join(argv) + "\n").encode())
+        self._handle.write((version_header() + "\n").encode())
         self.proc = await asyncio.create_subprocess_exec(
             *argv,
             stdout=self._handle,

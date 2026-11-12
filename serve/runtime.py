@@ -9,10 +9,21 @@ from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 
+from .catalog import vllm_executable
 from .config import Config
 from .util import human_bytes, one_line
 
 PACKAGE_FOR_ENGINE = {"vllm": ("vllm",), "vllm-omni": ("vllm", "vllm-omni")}
+
+# Import the modules the `vllm serve` CLI touches before it reads any config.
+# A version number on disk is not proof that the tree is importable: a stale
+# module left by an earlier install (or a dependency downgraded by another
+# package) only shows up here.
+IMPORT_PROBE = (
+    "import vllm, vllm.config.model, vllm.engine.arg_utils, "
+    "vllm.entrypoints.serve.utils.api_utils; "
+    "print('import ok', vllm.__version__)"
+)
 
 
 def installed_version(package: str) -> str | None:
@@ -46,6 +57,7 @@ class RuntimeManager:
         self._tasks: dict[str, asyncio.Task] = {}
         self._errors: dict[str, str] = {}
         self._lines: deque[str] = deque(maxlen=300)
+        self._verified: dict[str, str] = {}
         self.log_path = cfg.logs_dir / "install.log"
 
     # -- status ------------------------------------------------------------
@@ -74,13 +86,80 @@ class RuntimeManager:
     async def ensure(self, engine: str) -> None:
         if self.status(engine).installed:
             return
+        await self._ensure_install(engine)
+
+    async def _ensure_install(self, engine: str, reinstall: bool = False) -> None:
         task = self._tasks.get(engine)
         if task and not task.done():
-            await task
-            return
-        task = asyncio.create_task(self._install(engine))
+            await asyncio.gather(task, return_exceptions=True)
+            if not reinstall:
+                return
+        task = asyncio.create_task(self._install(engine, reinstall=reinstall))
         self._tasks[engine] = task
         await task
+
+    async def prepare(self, engine: str) -> None:
+        """Make sure the engine's package is the pinned version *and* imports.
+
+        Kaggle images ship their own vLLM, and a half-overwritten install still
+        reports the new version number while some modules are old. Both cases
+        end as ``engine exited with code 1`` inside ``import vllm``, so check
+        the import here where we can reinstall instead of guessing.
+        """
+        want = self.cfg.omni_version if engine == "vllm-omni" else self.cfg.vllm_version
+        have = installed_version("vllm")
+        if have != want:
+            self._emit(f"vllm {have or 'is missing'}, want {want}; reinstalling")
+            await self._ensure_install(engine, reinstall=True)
+        elif self._verified.get(engine) == want:
+            return
+
+        ok, output = await self.verify()
+        if not ok:
+            self._emit("the vllm install cannot be imported; reinstalling cleanly")
+            await self._ensure_install(engine, reinstall=True)
+            ok, output = await self.verify()
+            if not ok:
+                raise RuntimeError(
+                    f"vllm {installed_version('vllm')} is installed but cannot be imported:\n"
+                    + output
+                )
+        self._verified[engine] = installed_version("vllm") or want
+
+    async def verify(self) -> tuple[bool, str]:
+        """Run the engine CLI's import stack in a throwaway process.
+
+        The ``vllm`` console script imports every subcommand before it looks at
+        arguments, so ``serve --help`` reproduces exactly what the engine does
+        at startup, using the same interpreter the engine will use.
+        """
+        executable = vllm_executable(sys.executable)
+        argv = (
+            [executable, "serve", "--help"]
+            if executable
+            else [sys.executable, "-c", IMPORT_PROBE]
+        )
+        proc = await asyncio.create_subprocess_exec(
+            *argv,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+            env=dict(os.environ),
+        )
+        assert proc.stdout is not None
+        try:
+            raw = await asyncio.wait_for(proc.stdout.read(), timeout=600)
+            code = await asyncio.wait_for(proc.wait(), timeout=60)
+        except asyncio.TimeoutError:
+            proc.kill()
+            return False, "the vllm CLI did not answer within 600s"
+        text = raw.decode("utf-8", errors="replace").strip()
+        if code == 0:
+            self._emit("import check passed")
+            return True, text
+        for line in text.splitlines()[-25:]:
+            self._emit(line)
+        self._emit(f"import check failed with exit code {code}")
+        return False, text
 
     def start(self, engine: str) -> None:
         """Kick off an install without waiting for it."""
@@ -91,13 +170,13 @@ class RuntimeManager:
             return
         self._tasks[engine] = asyncio.create_task(self._install(engine))
 
-    async def _install(self, engine: str) -> None:
+    async def _install(self, engine: str, reinstall: bool = False) -> None:
         self._errors.pop(engine, None)
         self._emit(f"preparing {engine}")
         try:
             await self._ensure_uv()
             await self._check_space(engine)
-            steps = self._commands(engine)
+            steps = self._commands(engine, reinstall=reinstall)
             for argv in steps:
                 self._emit("$ " + " ".join(argv))
                 await self._run(argv)
@@ -114,35 +193,32 @@ class RuntimeManager:
             self.log.warning("runtime install failed for %s: %s", engine, exc)
             raise
 
-    def _commands(self, engine: str) -> list[list[str]]:
+    def _commands(self, engine: str, reinstall: bool = False) -> list[list[str]]:
         python = sys.executable
         uv = shutil.which("uv") or str(Path(sys.executable).with_name("uv"))
-        if engine == "vllm":
-            return [
-                [
-                    uv,
-                    "pip",
-                    "install",
-                    "--python",
-                    python,
-                    "--no-cache",
-                    "--torch-backend=auto",
-                    f"vllm=={self.cfg.vllm_version}",
-                ]
-            ]
-        return [
-            [
-                uv,
-                "pip",
-                "install",
-                "--python",
-                python,
-                "--no-cache",
-                "--torch-backend=auto",
-                f"vllm=={self.cfg.vllm_version}",
-                f"vllm-omni=={self.cfg.omni_version}",
-            ]
+        steps: list[list[str]] = []
+        if reinstall:
+            # Remove the old files first. `uv pip install --reinstall` only
+            # replaces what its own RECORD knows about, and Kaggle images ship
+            # vLLM installed by pip, so a plain reinstall can leave modules
+            # from the image behind and keep the import broken.
+            packages = ["vllm"] if engine == "vllm" else ["vllm", "vllm-omni"]
+            steps.append([python, "-m", "pip", "uninstall", "-y", *packages])
+        install = [
+            uv,
+            "pip",
+            "install",
+            "--python",
+            python,
+            "--no-cache",
+            "--torch-backend=auto",
+            *(["--reinstall"] if reinstall else []),
+            f"vllm=={self.cfg.vllm_version}",
         ]
+        if engine != "vllm":
+            install.append(f"vllm-omni=={self.cfg.omni_version}")
+        steps.append(install)
+        return steps
 
     async def _ensure_uv(self) -> None:
         if shutil.which("uv"):
