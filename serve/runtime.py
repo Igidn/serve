@@ -132,16 +132,20 @@ class RuntimeManager:
                 return
             ok, output = await llamacpp.verify(self.cfg)
             if not ok:
-                self._emit("llama.cpp cannot start; reinstalling the runtime")
+                for line in output.splitlines()[:20]:
+                    self._emit(f"  {line}")
+                self._emit("llama.cpp cannot see the GPU; fetching the CUDA runtime it needs")
                 await self._ensure_install(engine, reinstall=True)
                 ok, output = await llamacpp.verify(self.cfg)
                 if not ok:
+                    for line in output.splitlines()[:20]:
+                        self._emit(f"  {line}")
                     raise RuntimeError(
                         f"llama.cpp {self.cfg.llamacpp_build} is installed but CUDA is not "
-                        "available:\n" + output
+                        f"available: {output}"
                     )
             self._verified[engine] = self.cfg.llamacpp_build
-            self._emit(f"llama.cpp check passed: {one_line(output, 200)}")
+            self._emit(f"llama.cpp check passed: {' '.join(output.split())}")
             return
 
         want = self.cfg.omni_version if engine == "vllm-omni" else self.cfg.vllm_version
@@ -214,9 +218,10 @@ class RuntimeManager:
         try:
             await self._check_space(engine)
             if engine == "llamacpp":
-                if reinstall:
-                    shutil.rmtree(llamacpp.install_dir(self.cfg), ignore_errors=True)
-                found = await llamacpp.install(self.cfg, self._emit)
+                # install() fetches only what is missing, so a retry after a
+                # failed CUDA check downloads the bundled runtime instead of
+                # the 17 GB model or the binary again.
+                found = await llamacpp.install(self.cfg, self._emit, force_cudart=reinstall)
                 self._emit(f"llama.cpp {self.cfg.llamacpp_build} is ready at {found}")
                 return
             await self._ensure_uv()
