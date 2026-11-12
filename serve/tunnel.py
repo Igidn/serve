@@ -124,6 +124,14 @@ class Tunnel:
             code = await proc.wait() if proc is not None else None
             if self._stopping:
                 return
+            # ``opentunnel route add`` exits 0 once the route is established;
+            # the tunnel keeps running without the foreground process. A clean
+            # exit after we already have a URL means the tunnel is up, not that
+            # it crashed -- so don't reconnect.
+            if code == 0 and self.url is not None:
+                self.state = "ready"
+                self.log.info("tunnel established at %s", self.url)
+                return
             self.url = None
             self.state = "reconnecting"
             self._emit(f"tunnel exited (code {code}); reconnecting in {delay:.0f}s")
