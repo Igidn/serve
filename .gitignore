@@ -1,0 +1,11 @@
+.kaggle/*
+!.kaggle/kernel.py
+!.kaggle/kernel-metadata.json
+!.kaggle/README.md
+.serve/
+.serve-state/
+.model-datasets/
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
