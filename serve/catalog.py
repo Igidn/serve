@@ -388,20 +388,16 @@ def _llamacpp_argv(
         argv += ["--tensor-split", ",".join(["1"] * spec.tensor_parallel)]
     if spec.kind == "chat" and spec.max_model_len:
         argv += ["--ctx-size", str(spec.max_model_len)]
-        # Keys quantise to 8 bits, values stay f16: that halves the cache
-        # without needing a flash-attention kernel that Turing may not have.
-        argv += ["--cache-type-k", "q8_0", "--cache-type-v", "f16"]
+        # f16 on both sides. A quantised K cache on Turing has no compiled
+        # flash-attention kernel, so llama.cpp dequantises it on every
+        # attention call ("q8_0-f16 ... converting K and V to f16 (slow)").
+        argv += ["--cache-type-k", "f16", "--cache-type-v", "f16"]
     if spec.kind == "chat":
-        # Thinking is part of what this checkpoint is for, so leave it on (the
-        # template's own default) and put it in reasoning_content instead of
-        # inlining <think> in the answer. Per-request chat_template_kwargs can
-        # still set enable_thinking false or reasoning_effort low.
-        argv += [
-            "--reasoning-format",
-            "deepseek",
-            "--chat-template-kwargs",
-            '{"enable_thinking": true}',
-        ]
+        # Thinking is part of what this checkpoint is for, so leave it on and
+        # put it in reasoning_content instead of inlining <think> in the
+        # answer. Per-request chat_template_kwargs can still set
+        # enable_thinking false or a lower reasoning_effort.
+        argv += ["--reasoning", "on", "--reasoning-format", "deepseek"]
     if projector is not None:
         argv += ["--mmproj", str(projector)]
     argv += list(spec.extra_args)

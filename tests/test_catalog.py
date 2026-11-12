@@ -73,8 +73,11 @@ def test_llamacpp_command_uses_the_gguf_and_jinja(tmp_path) -> None:
     assert argv[argv.index("--ctx-size") + 1] == "131072"
     assert argv[argv.index("--tensor-split") + 1] == "1,1"
     assert argv[argv.index("--alias") + 1] == "qwen3.8-27b-gguf"
-    assert argv[argv.index("--chat-template-kwargs") + 1] == '{"enable_thinking": true}'
+    assert argv[argv.index("--reasoning") + 1] == "on"
     assert argv[argv.index("--reasoning-format") + 1] == "deepseek"
+    # Quantised K has no flash-attention kernel for Turing and is dequantised
+    # on every call, so both sides stay f16.
+    assert argv[argv.index("--cache-type-k") + 1] == "f16"
     assert "--jinja" in argv
     assert "--served-model-name" not in argv
 

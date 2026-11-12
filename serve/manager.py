@@ -5,6 +5,8 @@ import shutil
 from pathlib import Path
 from typing import Any
 
+import httpx
+
 from . import staging
 from .catalog import Catalog, ModelSpec
 from .config import Config
@@ -305,6 +307,9 @@ class ModelManager:
             await engine.start(argv)
             self.stage = "waiting for /health"
             await engine.wait_ready(timeout=3600)
+            if spec.kind == "chat":
+                self.stage = "warming up"
+                await self._warmup(spec)
 
             self.phase = "ready"
             self.stage = ""
@@ -328,6 +333,30 @@ class ModelManager:
             if self.engine is not None:
                 await self.engine.stop()
             self.engine = None
+
+    async def _warmup(self, spec: ModelSpec) -> None:
+        """One tiny completion, so the first real request is not the one that
+        pays for graph capture and the first full sweep over the weights.
+
+        On the T4s that first pass costs about two minutes; absorbing it into
+        the load keeps "ready" honest and makes agent harnesses look instant.
+        """
+        started = now()
+        url = f"http://127.0.0.1:{self.cfg.engine_port}/v1/chat/completions"
+        payload = {
+            "model": spec.key,
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": 1,
+            "temperature": 0,
+            "chat_template_kwargs": {"enable_thinking": False},
+        }
+        try:
+            async with httpx.AsyncClient(timeout=600.0) as client:
+                response = await client.post(url, json=payload)
+                response.raise_for_status()
+            self.log.info("warmup finished in %.1fs", now() - started)
+        except Exception as exc:  # a slow first pass is not a failed load
+            self.log.warning("warmup failed after %.1fs: %s", now() - started, exc)
 
     def _set_progress(self, done: int, total: int | None) -> None:
         self.bytes_done = done
