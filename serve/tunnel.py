@@ -27,6 +27,9 @@ class Tunnel:
         self.url: str | None = None
         self.error: str | None = None
         self._task: asyncio.Task | None = None
+        self._proc: asyncio.subprocess.Process | None = None
+        self._pump: asyncio.Task | None = None
+        self._stopping = False
         self._lock = asyncio.Lock()
         self.log_path = cfg.logs_dir / "tunnel.log"
 
@@ -63,6 +66,7 @@ class Tunnel:
             return
         if self._task and not self._task.done():
             return
+        self._stopping = False
         self._task = asyncio.create_task(self._start())
 
     async def retry(self) -> None:
@@ -70,6 +74,7 @@ class Tunnel:
         if task and not task.done():
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
+        await self._kill()
         self.start()
 
     async def _start(self) -> None:
@@ -79,16 +84,52 @@ class Tunnel:
             try:
                 self.restore_identity()
                 binary = await self._install_cli()
-                url = await self._route(binary)
-                self.url = url
-                self.state = "ready"
-                self.log.info("tunnel ready at %s", url)
-                self._emit(f"dashboard: {url}")
+                await self._supervise(binary)
+            except asyncio.CancelledError:
+                await self._kill()
+                raise
             except Exception as exc:
                 self.state = "error"
-                self.error = str(exc)
-                self._emit(f"tunnel failed: {exc}")
-                self.log.warning("tunnel setup failed: %s", exc)
+                self.error = str(exc) or exc.__class__.__name__
+                self._emit(f"tunnel failed: {self.error}")
+                self.log.warning("tunnel setup failed: %s", self.error)
+
+    async def _supervise(self, binary: str) -> None:
+        """Keep a tunnel process alive for as long as the app runs.
+
+        ``opentunnel route add`` does not detach: the process is the tunnel.
+        So a URL on stdout means "ready", and an exit means "reconnect", not
+        "broken". Restarting is cheap because the identity is on disk.
+        """
+        delay = 2.0
+        while not self._stopping:
+            try:
+                url = await self._route(binary)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                self.state = "error"
+                self.error = str(exc) or exc.__class__.__name__
+                self._emit(f"tunnel route failed: {self.error}")
+                self.log.warning("tunnel setup failed: %s", self.error)
+            else:
+                self.url = url
+                self.state = "ready"
+                self.error = None
+                self.log.info("tunnel ready at %s", url)
+                self._emit(f"dashboard: {url}")
+                delay = 2.0
+
+            proc = self._proc
+            code = await proc.wait() if proc is not None else None
+            if self._stopping:
+                return
+            self.url = None
+            self.state = "reconnecting"
+            self._emit(f"tunnel exited (code {code}); reconnecting in {delay:.0f}s")
+            self.log.warning("tunnel exited (code %s); reconnecting", code)
+            await asyncio.sleep(delay)
+            delay = min(delay * 2.0, 60.0)
 
     async def _install_cli(self) -> str:
         binary = shutil.which("opentunnel", path=self.cfg.opentunnel_env()["PATH"])
@@ -118,6 +159,12 @@ class Tunnel:
         return found
 
     async def _route(self, binary: str) -> str:
+        """Start the tunnel and return its URL as soon as it is printed.
+
+        The process is left running on purpose; ``_supervise`` waits on it and
+        restarts it when it dies. Waiting for it to exit here is what used to
+        turn a working tunnel into ``tunnel failed:`` after thirty seconds.
+        """
         argv = [
             binary,
             "route",
@@ -127,18 +174,25 @@ class Tunnel:
             self.cfg.route_name,
         ]
         self._emit("$ " + " ".join(argv))
-        proc = await asyncio.create_subprocess_exec(
-            *argv,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-            env=self.cfg.opentunnel_env(),
-        )
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *argv,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+                env=self.cfg.opentunnel_env(),
+            )
+        except:
+            proc = await asyncio.create_subprocess_exec(
+                "opentunnel up",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+        self._proc = proc
         assert proc.stdout is not None
-        url: str | None = None
+        url: asyncio.Future[str] = asyncio.get_running_loop().create_future()
         lines: list[str] = []
 
         async def pump() -> None:
-            nonlocal url
             assert proc.stdout is not None
             async for raw in proc.stdout:
                 line = raw.decode("utf-8", errors="replace").rstrip()
@@ -149,26 +203,46 @@ class Tunnel:
                     lines.pop(0)
                 self._emit(line)
                 stripped = line.strip()
-                if stripped.startswith("https://") and url is None:
-                    url = stripped
+                if stripped.startswith("https://") and not url.done():
+                    url.set_result(stripped)
+            if not url.done():
+                detail = " | ".join(lines[-4:]) or "no output"
+                url.set_exception(
+                    RuntimeError(f"opentunnel exited before printing a URL: {detail}")
+                )
 
+        # Kept referenced: cancelling the drain would close the pipe the
+        # tunnel process is still writing to.
+        self._pump = asyncio.create_task(pump())
         try:
-            await asyncio.wait_for(pump(), timeout=900)
-            code = await asyncio.wait_for(proc.wait(), timeout=30)
+            return await asyncio.wait_for(asyncio.shield(url), timeout=900)
         except asyncio.TimeoutError as exc:
-            proc.kill()
+            await self._kill()
             raise RuntimeError("timed out waiting for the tunnel certificate") from exc
+        except BaseException:
+            await self._kill()
+            raise
 
-        if code != 0 or not url:
-            detail = "\n".join(lines[-12:])
-            raise RuntimeError(f"opentunnel route add failed (exit {code}): {detail}")
-        return url
+    async def _kill(self) -> None:
+        proc, self._proc = self._proc, None
+        if proc is None or proc.returncode is not None:
+            return
+        try:
+            proc.terminate()
+            await asyncio.wait_for(proc.wait(), timeout=10)
+        except (ProcessLookupError, asyncio.TimeoutError):
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
 
     async def stop(self, keep_state: bool = False) -> None:
+        self._stopping = True
         task = self._task
         if task and not task.done() and not keep_state:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
+        await self._kill()
         binary = shutil.which("opentunnel", path=self.cfg.opentunnel_env()["PATH"])
         if binary:
             try:
