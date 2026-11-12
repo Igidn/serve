@@ -28,6 +28,7 @@
           <span class="micro">idle</span>
           <span id="idle">--:--</span>
         </div>
+        <button id="signout" class="ghost small" title="Forget this browser's session cookie">sign out</button>
         <button id="power" class="ghost small danger">end session</button>
       </div>
     </header>
@@ -102,6 +103,18 @@
                 <input id="idle-input" type="number" min="1" max="1440" step="1" />
                 <button id="idle-save" class="ghost small">save</button>
               </div>
+            </div>
+
+            <div class="setting">
+              <label class="micro">api key</label>
+              <div class="inline">
+                <code id="api-key" class="keyval" title="Reveal to read it">••••••••••••••••</code>
+                <button id="key-reveal" class="ghost small">reveal</button>
+                <button id="key-copy" class="ghost small">copy</button>
+              </div>
+              <p class="micro" style="margin-top: 8px; letter-spacing: 0.04em">
+                send as <code>Authorization: Bearer &lt;key&gt;</code> to <code>/v1</code>
+              </p>
             </div>
           </section>
         </div>

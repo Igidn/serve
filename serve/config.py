@@ -64,6 +64,7 @@ class Config:
     omni_version: str
     llamacpp_build: str
     llamacpp_cuda: str
+    api_key: str | None
     hf_token: str | None
     tunnel_enabled: bool
     tunnel_identity: str | None
@@ -92,6 +93,7 @@ class Config:
             omni_version=_str("SERVE_OMNI_VERSION", "0.32.0"),
             llamacpp_build=_str("SERVE_LLAMACPP_BUILD", "b12318"),
             llamacpp_cuda=_str("SERVE_LLAMACPP_CUDA", "cuda-12.8"),
+            api_key=os.environ.get("SERVE_API_KEY") or None,
             hf_token=hf_token,
             tunnel_enabled=_bool("SERVE_TUNNEL", True),
             tunnel_identity=os.environ.get("OPENTUNNEL_IDENTITY_B64")

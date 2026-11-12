@@ -10,6 +10,8 @@ const ui = {
   logTimer: null,
   stateTimer: null,
   idleFocused: false,
+  apiKey: null,
+  keyShown: false,
 };
 
 const esc = (value) =>
@@ -59,6 +61,11 @@ async function api(path, options = {}) {
     payload = await response.json();
   } catch (_) {
     payload = null;
+  }
+  if (response.status === 401 && !location.pathname.startsWith("/login")) {
+    // The cookie expired or the key was rotated: ask for it again.
+    location.href = "/login";
+    throw new Error("signed out");
   }
   if (!response.ok) {
     const message = payload?.error?.message || payload?.error || `request failed (${response.status})`;
@@ -418,6 +425,30 @@ function render(snapshot) {
   renderSession(snapshot);
 }
 
+/* ---------------------------------------------------------------- auth */
+
+async function loadAuth() {
+  try {
+    const auth = await api("/api/auth");
+    ui.apiKey = auth.key;
+  } catch (_) {
+    ui.apiKey = null;
+  }
+  renderKey();
+}
+
+function renderKey() {
+  const node = $("#api-key");
+  if (!node) return;
+  if (!ui.apiKey) {
+    node.textContent = "unavailable";
+    return;
+  }
+  node.textContent = ui.keyShown
+    ? ui.apiKey
+    : ui.apiKey.slice(0, 8) + "•".repeat(Math.min(22, Math.max(8, ui.apiKey.length - 8)));
+}
+
 /* ---------------------------------------------------------------- polling */
 
 async function refreshState() {
@@ -516,6 +547,21 @@ $("#identity").addEventListener("click", async () => {
 
 $("#power").addEventListener("click", shutdown);
 
+$("#signout").addEventListener("click", () => {
+  location.href = "/logout";
+});
+
+$("#key-reveal").addEventListener("click", () => {
+  ui.keyShown = !ui.keyShown;
+  $("#key-reveal").textContent = ui.keyShown ? "hide" : "reveal";
+  renderKey();
+});
+
+$("#key-copy").addEventListener("click", () => {
+  if (!ui.apiKey) return toast("the key is not available yet", true);
+  copy(ui.apiKey, "api key copied");
+});
+
 $("#idle-input").addEventListener("focus", () => { ui.idleFocused = true; });
 $("#idle-input").addEventListener("blur", () => { ui.idleFocused = false; });
 
@@ -558,5 +604,6 @@ document.addEventListener("visibilitychange", () => {
   }
 });
 
+loadAuth();
 pollState();
 pollLogs();

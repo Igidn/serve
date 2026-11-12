@@ -55,6 +55,8 @@ def start_upstream(port: int) -> uvicorn.Server:
 def client(cfg):
     app = create_app(cfg)
     with TestClient(app) as test_client:
+        # These tests are about the gateway, not the door; knock once.
+        test_client.headers["authorization"] = f"Bearer {app.state.auth.key}"
         yield test_client, app
 
 

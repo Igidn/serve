@@ -5,14 +5,16 @@ import logging
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
+from urllib.parse import parse_qs, quote
 
 import httpx
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import __version__
+from .auth import COOKIE, Auth, AuthMiddleware, safe_next
 from .catalog import ENGINES, Catalog, ModelSpec
 from .config import Config
 from .idle import IdleWatchdog
@@ -70,6 +72,12 @@ def create_app(cfg: Config | None = None) -> FastAPI:
     # Make Hugging Face keep its metadata inside the kernel's working directory.
     os.environ.setdefault("HF_HOME", str(cfg.hf_home))
     log = logging.getLogger("serve")
+    auth = Auth.from_config(cfg)
+    if auth.source == "env":
+        log.info("api key loaded from SERVE_API_KEY")
+    else:
+        log.info("api key: %s", auth.key)
+        log.info("  saved at %s; set SERVE_API_KEY to keep it across kernels", cfg.state_dir / "api-key")
     catalog = Catalog(cfg.custom_models_file)
     runtime = RuntimeManager(cfg, logging.getLogger("serve.runtime"))
     manager = ModelManager(cfg, catalog, runtime, logging.getLogger("serve.engine"))
@@ -97,6 +105,7 @@ def create_app(cfg: Config | None = None) -> FastAPI:
 
     app = FastAPI(title="serve", version=__version__, lifespan=lifespan)
     app.state.cfg = cfg
+    app.state.auth = auth
     app.state.catalog = catalog
     app.state.manager = manager
     app.state.runtime = runtime
@@ -105,6 +114,9 @@ def create_app(cfg: Config | None = None) -> FastAPI:
     app.state.shutdown = shutdown
     app.state.watchdog = watchdog
 
+    # Auth is added first so CORS wraps it: a browser preflight must be
+    # answered by CORS without a key, and a 401 must still carry CORS headers.
+    app.add_middleware(AuthMiddleware, auth=auth, log=logging.getLogger("serve.auth"))
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["*"],
@@ -328,6 +340,49 @@ def create_app(cfg: Config | None = None) -> FastAPI:
     async def health():
         return {"ok": True, "phase": manager.phase}
 
+    # -- auth ----------------------------------------------------------
+
+    @app.get("/api/auth")
+    async def auth_info():
+        return {"key": auth.key, "source": auth.source}
+
+    @app.get("/login")
+    async def login_page(request: Request):
+        if auth.session_ok(request.cookies.get(COOKIE)):
+            return RedirectResponse("/", status_code=303)
+        return FileResponse(STATIC_DIR / "login.html")
+
+    @app.post("/login")
+    async def login(request: Request):
+        form = await _form(request)
+        target = safe_next(str(form.get("next") or "/"))
+        if not auth.matches(str(form.get("key") or "")):
+            # A fixed pause is cheap and makes guessing the key a slow hobby.
+            await asyncio.sleep(0.4)
+            log.warning("rejected dashboard login from %s", _client(request))
+            return RedirectResponse(
+                f"/login?error=1&next={quote(target)}", status_code=303
+            )
+        secure = request.headers.get("x-forwarded-proto", request.url.scheme) == "https"
+        response = RedirectResponse(target, status_code=303)
+        response.set_cookie(
+            COOKIE,
+            auth.session(),
+            max_age=auth.ttl,
+            httponly=True,
+            samesite="lax",
+            secure=secure,
+            path="/",
+        )
+        log.info("dashboard unlocked from %s", _client(request))
+        return response
+
+    @app.get("/logout")
+    async def logout():
+        response = RedirectResponse("/login", status_code=303)
+        response.delete_cookie(COOKIE, path="/")
+        return response
+
     # -- dashboard -----------------------------------------------------
 
     @app.get("/")
@@ -348,6 +403,19 @@ async def _json(request: Request) -> dict:
     except Exception:
         return {}
     return payload if isinstance(payload, dict) else {}
+
+
+async def _form(request: Request) -> dict[str, str]:
+    """The login form, without pulling in python-multipart for one POST."""
+    try:
+        text = (await request.body()).decode("utf-8")
+    except UnicodeDecodeError:
+        return {}
+    return {key: values[-1] for key, values in parse_qs(text, keep_blank_values=True).items()}
+
+
+def _client(request: Request) -> str:
+    return request.client.host if request.client else "unknown"
 
 
 def _key_from_repo(repo: str) -> str:

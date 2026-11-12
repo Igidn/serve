@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>serve — sign in</title>
+    <link rel="stylesheet" href="/static/style.css" />
+  </head>
+  <body class="login-page">
+    <main class="login-card">
+      <div class="brand">
+        <span class="mark" aria-hidden="true"></span>
+        <div>
+          <h1>serve</h1>
+          <p>GPU gateway</p>
+        </div>
+      </div>
+
+      <form method="post" action="/login" autocomplete="off">
+        <input type="hidden" name="next" id="next" value="/" />
+        <label class="micro" for="key">api key</label>
+        <input
+          id="key"
+          name="key"
+          type="password"
+          placeholder="sk-serve-…"
+          spellcheck="false"
+          autocapitalize="off"
+          autofocus
+          required
+        />
+        <button class="primary" type="submit">unlock</button>
+      </form>
+
+      <p id="error" class="login-error" hidden>That key does not match.</p>
+
+      <p class="login-hint">
+        The key lives in <code>/kaggle/working/serve-state/api-key</code> and in
+        the app log. Set <code>SERVE_API_KEY</code> as a Kaggle secret to pin it.
+      </p>
+    </main>
+    <script>
+      const params = new URLSearchParams(location.search);
+      if (params.get("error")) document.getElementById("error").hidden = false;
+      document.getElementById("next").value = params.get("next") || "/";
+    </script>
+  </body>
+</html>
