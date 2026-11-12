@@ -1,7 +1,4 @@
-.kaggle/*
-!.kaggle/kernel.py
-!.kaggle/kernel-metadata.json
-!.kaggle/README.md
+.kaggle/
 .serve/
 .serve-state/
 .model-datasets/
