@@ -209,6 +209,10 @@ import json
 import sys
 
 path, dataset_id, title, license_name, repo = sys.argv[1:6]
+title = title.strip()[:50] or "Model weights"
+if len(title) < 6:
+    title = (title + " weights")[:50]
+
 with open(path) as handle:
     metadata = json.load(handle)
 
