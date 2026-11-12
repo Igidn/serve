@@ -16,7 +16,10 @@ REPO_URL = "https://github.com/Igidn/serve.git"
 BRANCH = "main"
 WORK = "/kaggle/working/serve"
 MODEL_DATASET = "katherinameyerkat/qwen3-8-27b-gptq-4bit"
-MODEL_MOUNT = "/kaggle/input/qwen3-8-27b-gptq-4bit"
+MODEL_MOUNTS = (
+    "/kaggle/input/datasets/katherinameyerkat/qwen3-8-27b-gptq-4bit",
+    "/kaggle/input/qwen3-8-27b-gptq-4bit",
+)
 
 
 def run(argv: list[str], **kwargs) -> None:
@@ -52,10 +55,13 @@ def main() -> None:
     os.chdir(WORK)
     sys.path.insert(0, WORK)
 
-    mounted = os.path.isfile(os.path.join(MODEL_MOUNT, "config.json"))
+    mounted = next(
+        (path for path in MODEL_MOUNTS if os.path.isfile(os.path.join(path, "config.json"))),
+        None,
+    )
     print(
         f"model dataset {MODEL_DATASET}: "
-        f"{'mounted at ' + MODEL_MOUNT if mounted else 'NOT mounted'}",
+        f"{'mounted at ' + mounted if mounted else 'NOT mounted'}",
         flush=True,
     )
 
@@ -92,7 +98,19 @@ def main() -> None:
         env["SERVE_IDLE_TIMEOUT"] = str(idle)
         print(f"idle timeout override: {idle}s", flush=True)
 
-    os.execvpe(sys.executable, [sys.executable, "-m", "serve.main"], env)
+    # Keep this process alive. Replacing the Jupyter kernel with os.exec* makes
+    # Kaggle think the notebook died and restart it, which kills the gateway.
+    # The child exits when the idle watchdog or /api/shutdown ends the run;
+    # then this parent exits too, so Kaggle stops metering GPU time.
+    argv = [sys.executable, "-m", "serve.main"]
+    print("+", " ".join(argv), flush=True)
+    try:
+        code = subprocess.call(argv, env=env)
+    except KeyboardInterrupt:
+        code = 130
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(code)
 
 
 if __name__ == "__main__":

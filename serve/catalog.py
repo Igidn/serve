@@ -87,7 +87,10 @@ PRESETS: tuple[ModelSpec, ...] = (
             "--limit-mm-per-prompt",
             '{"image": 2}',
         ],
-        local_paths=["/kaggle/input/qwen3-8-27b-gptq-4bit"],
+        local_paths=[
+            "/kaggle/input/datasets/katherinameyerkat/qwen3-8-27b-gptq-4bit",
+            "/kaggle/input/qwen3-8-27b-gptq-4bit",
+        ],
         notes=(
             "21 GB of weights: it does not fit in Kaggle's 20 GB working disk. "
             "Attach it as a Kaggle Dataset (auto-detected under /kaggle/input) "
@@ -246,7 +249,9 @@ class Catalog:
             name = _slug(candidate.name)
             if name in {wanted, flattened} or wanted in name or name in wanted:
                 return candidate
-        for candidate in root.glob("*/*/"):
+        # Older kernels mount datasets at /kaggle/input/<slug>; newer ones use
+        # /kaggle/input/datasets/<owner>/<slug>.
+        for candidate in (*root.glob("*/*/"), *root.glob("datasets/*/*/")):
             try:
                 if (candidate / "config.json").is_file():
                     name = _slug(candidate.name)
