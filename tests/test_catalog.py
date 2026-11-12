@@ -23,6 +23,12 @@ def test_chat_command_carries_t4_settings(monkeypatch) -> None:
     assert "--served-model-name qwen3.8-27b-gptq" in joined
     assert "--enforce-eager" in argv
     assert "--omni" not in argv
+    assert "--enable-auto-tool-choice" in argv
+    assert argv[argv.index("--tool-call-parser") + 1] == "qwen3_xml"
+    assert argv[argv.index("--reasoning-parser") + 1] == "qwen3"
+    assert argv[argv.index("--default-chat-template-kwargs") + 1] == (
+        '{"enable_thinking": false}'
+    )
 
 
 def test_image_command_uses_omni_without_served_name(monkeypatch) -> None:

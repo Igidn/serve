@@ -86,6 +86,18 @@ PRESETS: tuple[ModelSpec, ...] = (
             "--skip-mm-profiling",
             "--limit-mm-per-prompt",
             '{"image": 2}',
+            # The chat template renders tool calls as <function=name> XML, so
+            # the XML parser is the one that turns them into tool_calls.
+            "--enable-auto-tool-choice",
+            "--tool-call-parser",
+            "qwen3_xml",
+            "--reasoning-parser",
+            "qwen3",
+            # Thinking defaults to xhigh, which on two T4s means minutes of
+            # <think> before the first useful token. Agent harnesses want it
+            # off unless the request asks for it.
+            "--default-chat-template-kwargs",
+            '{"enable_thinking": false}',
         ],
         local_paths=[
             "/kaggle/input/datasets/katherinameyerkat/qwen3-8-27b-gptq-4bit",
