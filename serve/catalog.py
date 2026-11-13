@@ -39,6 +39,11 @@ class ModelSpec:
     # the formats we never serve". GGUF repos ship every quantisation side by
     # side, so an empty list there would pull hundreds of gigabytes.
     files: list[str] = field(default_factory=list)
+    # Optional speculative-decoding drafter, fetched from its own repo into
+    # <model dir>/draft. The engine flags that turn it on (--spec-type and
+    # friends) still come from extra_args; only the file is wired up here.
+    draft_repo: str = ""
+    draft_files: list[str] = field(default_factory=list)
     min_vram_gb: float = 0.0
     notes: str = ""
     builtin: bool = True
@@ -52,6 +57,8 @@ class ModelSpec:
             raise ValueError(f"engine must be one of {ENGINES}")
         if not re.fullmatch(r"[\w.-]+/[\w.-]+", self.repo):
             raise ValueError("repo must look like 'owner/name'")
+        if self.draft_repo and not re.fullmatch(r"[\w.-]+/[\w.-]+", self.draft_repo):
+            raise ValueError("draft_repo must look like 'owner/name'")
         if not 1 <= self.tensor_parallel <= 8:
             raise ValueError("tensor_parallel must be between 1 and 8")
         return self
@@ -67,6 +74,7 @@ class ModelSpec:
         spec.extra_args = [str(a) for a in (spec.extra_args or [])]
         spec.local_paths = [str(p) for p in (spec.local_paths or [])]
         spec.files = [str(f) for f in (spec.files or [])]
+        spec.draft_files = [str(f) for f in (spec.draft_files or [])]
         return spec.validate()
 
 
@@ -78,24 +86,54 @@ def _t4_chat(**kwargs) -> ModelSpec:
 PRESETS: tuple[ModelSpec, ...] = (
     ModelSpec(
         key="qwen3.8-27b-gguf",
-        label="Qwen3.8 27B (GGUF Q4_K_M)",
-        repo="unsloth/Qwen3.8-27B-GGUF",
+        label="Qwen3.8 27B (GSQ-RCO IQ3_S + DSpark)",
+        repo="ISTA-DASLab/Qwen3.8-27B-GSQ-RCO-GGUF",
         kind="chat",
         engine="llamacpp",
-        size_gb=17.49,
+        size_gb=14.16,
         min_vram_gb=24.0,
         tensor_parallel=2,
         dtype=None,
         max_model_len=131072,
-        # The repo carries 25 quantisations (300+ GB); fetch only this one and
-        # the vision projector.
-        files=["Qwen3.8-27B-UD-Q4_K_M.gguf", "mmproj-F16.gguf"],
+        # The repo carries four tiers; IQ3_S is 3.50 bpw (the "3.5" build) and
+        # the one its card calls task-lossless. 12.7 GB with the projector
+        # leaves room in the 20 GB working disk that the 16.6 GiB dense Q4_K_M
+        # only just fit.
+        files=[
+            "Qwen3.8-27B-GSQ-RCO-IQ3_S.gguf",
+            "mmproj-Qwen3.8-27B-BF16.gguf",
+        ],
+        # A separate 1.4B drafter, not the target's own MTP head: DSpark reads
+        # the target's hidden states and emits a block of drafts per pass.
+        draft_repo="erlidev/Qwen3.8-27B-DSpark-GGUF",
+        draft_files=["Qwen3.8-27B-DSpark-Q8_0.gguf"],
+        extra_args=[
+            "--spec-type",
+            "draft-dspark",
+            # The checkpoint's serving block size is 7 (it was trained at 16);
+            # llama.cpp clamps this to what the draft was built for.
+            "--spec-draft-n-max",
+            "7",
+            # Both sides must be on the GPUs. A draft left on CPU cannot keep
+            # up with a 27B target and the speedup disappears.
+            "--spec-draft-ngl",
+            "999",
+        ],
         notes=(
-            "llama.cpp instead of vLLM. 16.6 GB of weights plus the 0.9 GB "
-            "vision projector fit the 20 GB working disk and split across two "
-            "T4s, so no Kaggle Dataset and no 20 GB FUSE copy are needed. "
-            "Chat template and tool calls come from the GGUF metadata via "
-            "--jinja; the KV cache is quantised so a 128k context fits."
+            "llama.cpp instead of vLLM. GSQ-RCO is per-tensor mixed precision: "
+            "at 3.50 bpw it reproduces the BF16 model on AIME25 and "
+            "LiveCodeBench v6, and the target plus projector is 12.7 GB, which "
+            "is 4.8 GB less than the UD Q4_K_M it replaces. Speed comes from "
+            "DSpark, a 1.4B block-diffusion drafter converted for llama.cpp: "
+            "its card measures 1.7 to 2.5x decode on one 4090D with a Q4_K_M "
+            "target, best on math and worst on competitive code. The drafter "
+            "adds ~1.5 GB of weights, so the whole set is 14.2 GB and there is "
+            "still disk headroom; watch VRAM and the acceptance rate in the "
+            "engine log, and drop the --spec flags if acceptance falls below "
+            "~40%, where drafting costs more than it saves. Vision still "
+            "works: the mmproj is the BF16 projector from the same repo. Chat "
+            "template and tool calls come from the GGUF metadata via --jinja; "
+            "the KV cache is f16 so a 128k context fits."
         ),
     ),
     _t4_chat(
@@ -257,6 +295,18 @@ class Catalog:
     def download_dir(self, spec: ModelSpec, models_dir: Path) -> Path:
         return models_dir / spec.key
 
+    def draft_dir(self, spec: ModelSpec, models_dir: Path) -> Path:
+        """Where a configured drafter's GGUF lands.
+
+        A subdirectory keeps it out of ``is_checkpoint`` and out of the
+        target's top-level ``*.gguf`` glob, so a drafter can never be loaded
+        as the model itself.
+        """
+        return self.download_dir(spec, models_dir) / "draft"
+
+    def draft_file(self, spec: ModelSpec, models_dir: Path) -> Path | None:
+        return llamacpp_draft(self.draft_dir(spec, models_dir))
+
     def cached(self, spec: ModelSpec, models_dir: Path) -> bool:
         return self.is_checkpoint(self.download_dir(spec, models_dir), spec)
 
@@ -352,8 +402,21 @@ def llamacpp_checkpoint(source: Path) -> tuple[Path | None, Path | None]:
     return max(weights, key=lambda p: p.stat().st_size), projector
 
 
+def llamacpp_draft(source: Path) -> Path | None:
+    """Largest GGUF in a drafter's directory, or None when it is not there."""
+    try:
+        files = [p for p in sorted(Path(source).glob("*.gguf")) if p.is_file()]
+    except OSError:
+        return None
+    return max(files, key=lambda p: p.stat().st_size) if files else None
+
+
 def _llamacpp_argv(
-    spec: ModelSpec, source: str, port: int, state_dir: Path | str | None
+    spec: ModelSpec,
+    source: str,
+    port: int,
+    state_dir: Path | str | None,
+    draft: Path | str | None = None,
 ) -> list[str]:
     binary = llamacpp_binary(state_dir)
     if not binary:
@@ -400,6 +463,16 @@ def _llamacpp_argv(
         argv += ["--reasoning", "on", "--reasoning-format", "deepseek"]
     if projector is not None:
         argv += ["--mmproj", str(projector)]
+    if spec.draft_repo:
+        draft_path = (
+            Path(draft) if draft is not None else llamacpp_draft(Path(source) / "draft")
+        )
+        if draft_path is None or not draft_path.is_file():
+            raise RuntimeError(
+                f"{spec.draft_repo} is configured as the drafter but its .gguf is "
+                "missing; a load downloads it next to the target weights"
+            )
+        argv += ["--model-draft", str(draft_path)]
     argv += list(spec.extra_args)
     return argv
 
@@ -410,9 +483,10 @@ def build_argv(
     port: int,
     python: str = sys.executable,
     state_dir: Path | str | None = None,
+    draft: Path | str | None = None,
 ) -> list[str]:
     if spec.engine == "llamacpp":
-        return _llamacpp_argv(spec, source, port, state_dir)
+        return _llamacpp_argv(spec, source, port, state_dir, draft)
 
     executable = vllm_executable(python)
     if executable:

@@ -51,10 +51,18 @@ async def download_snapshot(
     cfg: Config,
     log,
     on_progress,
+    repo: str | None = None,
+    patterns: list[str] | None = None,
 ) -> Path:
+    """Fetch the files that ``patterns`` selects from ``repo`` into ``dest``.
+
+    Defaults to the spec's own repo and file list; the drafter passes its own
+    so a second repository can land beside the target.
+    """
     dest.mkdir(parents=True, exist_ok=True)
-    patterns = list(spec.files) or None
-    total = remote_size(spec.repo, cfg.hf_token, patterns)
+    repo = repo or spec.repo
+    patterns = list(patterns if patterns is not None else spec.files) or None
+    total = remote_size(repo, cfg.hf_token, patterns)
     if total:
         free = shutil.disk_usage(cfg.state_dir).free
         # Hugging Face downloads into a temporary file inside the destination
@@ -78,10 +86,10 @@ async def download_snapshot(
     try:
         from huggingface_hub import snapshot_download
 
-        log.info("downloading %s → %s", spec.repo, dest)
+        log.info("downloading %s → %s", repo, dest)
         await asyncio.to_thread(
             snapshot_download,
-            repo_id=spec.repo,
+            repo_id=repo,
             local_dir=str(dest),
             token=cfg.hf_token,
             allow_patterns=patterns,
@@ -95,7 +103,7 @@ async def download_snapshot(
     if not Catalog.is_checkpoint(dest, spec):
         expected = "a .gguf file" if spec.engine == "llamacpp" else "config.json"
         raise RuntimeError(
-            f"{spec.repo} was downloaded but has no {expected}; it may not be a full checkpoint"
+            f"{repo} was downloaded but has no {expected}; it may not be a full checkpoint"
         )
     return dest
 
@@ -237,6 +245,13 @@ class ModelManager:
                         bytes_done=done, bytes_total=total or job.get("bytes_total")
                     ),
                 )
+                if spec.draft_repo:
+                    await self._ensure_draft(
+                        spec,
+                        on_progress=lambda done, total: job.update(
+                            bytes_done=done, bytes_total=total or job.get("bytes_total")
+                        ),
+                    )
                 job["state"] = "done"
                 self._sizes.pop(key, None)
             except Exception as exc:
@@ -306,6 +321,10 @@ class ModelManager:
             else:
                 self.stage = f"using local weights at {local}"
 
+            if spec.draft_repo:
+                self.stage = f"downloading drafter {spec.draft_repo}"
+                await self._ensure_draft(spec)
+
             self.source = source
             self.bytes_total = None
             self.progress = None
@@ -314,7 +333,11 @@ class ModelManager:
             from .engine import EngineProcess
 
             argv = build_argv(
-                spec, source, self.cfg.engine_port, state_dir=self.cfg.state_dir
+                spec,
+                source,
+                self.cfg.engine_port,
+                state_dir=self.cfg.state_dir,
+                draft=self.catalog.draft_file(spec, self.cfg.models_dir),
             )
             self.stage = "starting engine"
             engine = EngineProcess(
@@ -381,6 +404,22 @@ class ModelManager:
         self.bytes_total = total
         if total:
             self.progress = min(1.0, done / total)
+
+    async def _ensure_draft(self, spec: ModelSpec, on_progress=None) -> None:
+        """Fetch the speculative drafter once, into its own subdirectory."""
+        dest = self.catalog.draft_dir(spec, self.cfg.models_dir)
+        if self.catalog.draft_file(spec, self.cfg.models_dir) is not None:
+            return
+        self.log.info("downloading drafter %s → %s", spec.draft_repo, dest)
+        await download_snapshot(
+            spec,
+            dest,
+            self.cfg,
+            self.log,
+            on_progress or self._set_progress,
+            repo=spec.draft_repo,
+            patterns=spec.draft_files,
+        )
 
     async def _stage_weights(self, spec: ModelSpec, local: Path) -> tuple[str, Path]:
         """Copy weights off a network mount so the engine reads local disk."""

@@ -63,6 +63,9 @@ def test_llamacpp_command_uses_the_gguf_and_jinja(tmp_path) -> None:
     weights.mkdir()
     (weights / "Qwen3.8-27B-UD-Q4_K_M.gguf").write_bytes(b"x" * 64)
     (weights / "mmproj-F16.gguf").write_bytes(b"x" * 8)
+    draft = weights / "draft"
+    draft.mkdir()
+    (draft / "Qwen3.8-27B-DSpark-Q8_0.gguf").write_bytes(b"y" * 16)
 
     spec = next(s for s in PRESETS if s.key == "qwen3.8-27b-gguf")
     argv = build_argv(spec, str(weights), 8001, state_dir=state)
@@ -70,6 +73,12 @@ def test_llamacpp_command_uses_the_gguf_and_jinja(tmp_path) -> None:
     assert argv[0] == str(binary)
     assert argv[argv.index("--model") + 1] == str(weights / "Qwen3.8-27B-UD-Q4_K_M.gguf")
     assert argv[argv.index("--mmproj") + 1] == str(weights / "mmproj-F16.gguf")
+    # The drafter lives in its own subdirectory and must never be mistaken for
+    # the target weights.
+    assert argv[argv.index("--model-draft") + 1] == str(draft / "Qwen3.8-27B-DSpark-Q8_0.gguf")
+    assert argv[argv.index("--spec-type") + 1] == "draft-dspark"
+    assert argv[argv.index("--spec-draft-n-max") + 1] == "7"
+    assert argv[argv.index("--spec-draft-ngl") + 1] == "999"
     assert argv[argv.index("--ctx-size") + 1] == "131072"
     assert argv[argv.index("--tensor-split") + 1] == "1,1"
     assert argv[argv.index("--alias") + 1] == "qwen3.8-27b-gguf"
@@ -80,6 +89,22 @@ def test_llamacpp_command_uses_the_gguf_and_jinja(tmp_path) -> None:
     assert argv[argv.index("--cache-type-k") + 1] == "f16"
     assert "--jinja" in argv
     assert "--served-model-name" not in argv
+
+
+def test_llamacpp_refuses_to_start_without_its_drafter(tmp_path) -> None:
+    state = tmp_path / "serve-state"
+    binary = state / "runtime" / "llamacpp" / "b12318" / "build" / "bin" / "llama-server"
+    binary.parent.mkdir(parents=True)
+    binary.write_text("#!/bin/sh\n")
+    binary.chmod(0o755)
+
+    weights = tmp_path / "weights"
+    weights.mkdir()
+    (weights / "model-Q4_K_M.gguf").write_bytes(b"x" * 64)
+
+    spec = next(s for s in PRESETS if s.key == "qwen3.8-27b-gguf")
+    with pytest.raises(RuntimeError, match="drafter"):
+        build_argv(spec, str(weights), 8001, state_dir=state)
 
 
 def test_llamacpp_without_a_binary_explains_itself(tmp_path) -> None:
