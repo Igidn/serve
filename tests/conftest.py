@@ -16,7 +16,7 @@ def free_port() -> int:
 @pytest.fixture
 def cfg(tmp_path, monkeypatch):
     monkeypatch.setenv("SERVE_WORK_DIR", str(tmp_path))
-    monkeypatch.setenv("SERVE_TUNNEL", "0")
+    monkeypatch.setenv("SERVE_PI_TUNNEL", "0")
     monkeypatch.setenv("SERVE_ALLOW_EXIT", "0")
     monkeypatch.setenv("SERVE_ENGINE_PORT", str(free_port()))
     monkeypatch.setenv("SERVE_IDLE_TIMEOUT", "600")

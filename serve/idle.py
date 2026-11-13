@@ -6,8 +6,8 @@ import asyncio
 class IdleWatchdog:
     """Ends the Kaggle run after a period without inference traffic.
 
-    Status polling from the dashboard deliberately does *not* count as
-    activity, otherwise an open browser tab would hold the GPU forever.
+    Status polling from the Pi's health endpoint deliberately does *not* count
+    as activity, otherwise a monitoring loop would hold the GPU forever.
     A load, an unload, a download or an in-flight request pauses the timer.
     """
 

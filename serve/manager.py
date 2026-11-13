@@ -148,12 +148,30 @@ class ModelManager:
 
     # -- public actions ----------------------------------------------------
 
-    async def load(self, key: str, replace: bool = False, actor: str = "dashboard") -> None:
+    async def load(self, key: str, replace: bool = False, actor: str = "node") -> None:
         spec = self.catalog.get(key)
         self._assert_can_load(spec, replace)
         self.log.info("load %s requested by %s", key, actor)
         self.touch()
         self._load_task = asyncio.create_task(self._load(spec))
+
+    async def load_and_wait(self, key: str, replace: bool = False) -> None:
+        """Install the runtime, download the model, and block until ready."""
+        await self.load(key, replace=replace)
+        task = self._load_task
+        if task is not None:
+            await task
+        if self.phase != "ready":
+            raise RuntimeError(self.error or f"{key} did not become ready")
+        self.touch()
+
+    def request_started(self) -> None:
+        self.inflight += 1
+        self.touch()
+
+    def request_finished(self) -> None:
+        self.inflight = max(0, self.inflight - 1)
+        self.touch()
 
     def _assert_can_load(self, spec: ModelSpec, replace: bool) -> None:
         if self._load_task and not self._load_task.done():

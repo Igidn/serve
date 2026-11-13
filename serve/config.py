@@ -43,11 +43,11 @@ def _default_root() -> Path:
 
 @dataclass(frozen=True)
 class Config:
-    """Everything the gateway needs to know about its environment.
+    """Everything the two halves of serve need to know about their host.
 
-    On Kaggle the root is ``/kaggle/working``. Models, logs and the tunnel
-    identity all live under ``<root>/serve-state`` so they survive until the
-    kernel run ends and show up in the kernel's output files.
+    On Kaggle the root is ``/kaggle/working``. On the Raspberry Pi it is a
+    local ``.serve`` directory. Models, logs and the opentunnel identity all
+    live under ``<root>/serve-state``.
     """
 
     root: Path
@@ -55,22 +55,34 @@ class Config:
     models_dir: Path
     logs_dir: Path
     hf_home: Path
-    app_port: int
     engine_port: int
     idle_timeout: float
-    route_name: str
-    profile: str
     vllm_version: str
     omni_version: str
     llamacpp_build: str
     llamacpp_cuda: str
-    api_key: str | None
     hf_token: str | None
-    tunnel_enabled: bool
-    tunnel_identity: str | None
     allow_exit: bool
     max_model_len_cap: int
     stage_models: bool
+
+    # The model the Kaggle node installs and serves without a dashboard.
+    model_key: str
+    # The Pi's persistent opentunnel WebSocket URL (wss://.../kaggle).
+    relay_url: str
+    # Optional shared secret for the public WebSocket endpoint. This is not
+    # the harness API key; the harness talks to the Pi over the LAN only.
+    relay_token: str | None
+
+    # Pi-side listeners: HTTP for the local harness, WebSocket for Kaggle.
+    pi_http_host: str
+    pi_http_port: int
+    pi_ws_host: str
+    pi_ws_port: int
+    pi_ws_path: str
+    pi_tunnel: bool
+    pi_tunnel_name: str
+    pi_tunnel_url_file: Path
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -84,31 +96,32 @@ class Config:
             models_dir=state / "models",
             logs_dir=state / "logs",
             hf_home=Path(_str("HF_HOME", str(state / "hf"))).expanduser(),
-            app_port=_int("SERVE_PORT", 8000),
             engine_port=_int("SERVE_ENGINE_PORT", 8001),
             idle_timeout=_float("SERVE_IDLE_TIMEOUT", 600.0),
-            route_name=_str("SERVE_ROUTE_NAME", "serve"),
-            profile=_str("OPENTUNNEL_PROFILE", "default"),
             vllm_version=_str("SERVE_VLLM_VERSION", "0.32.0"),
             omni_version=_str("SERVE_OMNI_VERSION", "0.32.0"),
             llamacpp_build=_str("SERVE_LLAMACPP_BUILD", "b12318"),
             llamacpp_cuda=_str("SERVE_LLAMACPP_CUDA", "cuda-12.8"),
-            api_key=os.environ.get("SERVE_API_KEY") or None,
             hf_token=hf_token,
-            tunnel_enabled=_bool("SERVE_TUNNEL", True),
-            tunnel_identity=os.environ.get("OPENTUNNEL_IDENTITY_B64")
-            or os.environ.get("OPENTUNNEL_IDENTITY")
-            or None,
             allow_exit=_bool("SERVE_ALLOW_EXIT", on_kaggle),
             max_model_len_cap=_int("SERVE_MAX_MODEL_LEN", 32768),
             stage_models=_bool("SERVE_STAGE_MODELS", True),
+            model_key=_str("SERVE_MODEL", "qwen3.8-27b-gguf"),
+            relay_url=_str("SERVE_RELAY_URL", "ws://127.0.0.1:8787/kaggle"),
+            relay_token=os.environ.get("SERVE_RELAY_TOKEN") or None,
+            pi_http_host=_str("SERVE_PI_HTTP_HOST", "0.0.0.0"),
+            pi_http_port=_int("SERVE_PI_HTTP_PORT", 8080),
+            pi_ws_host=_str("SERVE_PI_WS_HOST", "0.0.0.0"),
+            pi_ws_port=_int("SERVE_PI_WS_PORT", 8787),
+            pi_ws_path=_str("SERVE_PI_WS_PATH", "/kaggle"),
+            pi_tunnel=_bool("SERVE_PI_TUNNEL", True),
+            pi_tunnel_name=_str("SERVE_PI_TUNNEL_NAME", "serve-relay"),
+            pi_tunnel_url_file=Path(
+                _str("SERVE_PI_TUNNEL_URL_FILE", str(state / "pi-tunnel-url.txt"))
+            ).expanduser(),
         )
 
     # -- derived paths -----------------------------------------------------
-
-    @property
-    def settings_file(self) -> Path:
-        return self.state_dir / "settings.json"
 
     @property
     def custom_models_file(self) -> Path:
@@ -133,10 +146,6 @@ class Config:
     @property
     def opentunnel_runtime(self) -> Path:
         return self.opentunnel_dir / "runtime"
-
-    @property
-    def opentunnel_profile_dir(self) -> Path:
-        return self.opentunnel_data / "opentunnel" / self.profile
 
     def ensure(self) -> "Config":
         for path in (
@@ -165,7 +174,6 @@ class Config:
                 "XDG_CONFIG_HOME": str(self.opentunnel_config),
                 "XDG_STATE_HOME": str(self.opentunnel_state),
                 "XDG_RUNTIME_DIR": str(self.opentunnel_runtime),
-                "OPENTUNNEL_PROFILE": self.profile,
                 "PATH": os.pathsep.join(
                     [str(Path.home() / ".local" / "bin"), env.get("PATH", "")]
                 ),

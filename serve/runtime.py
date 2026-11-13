@@ -54,8 +54,8 @@ class RuntimeManager:
 
     Installation is deliberately a first-class, visible action instead of
     something the kernel launcher does silently: on Kaggle it takes several
-    minutes and several GB, and the dashboard should still be reachable while
-    it runs.
+    minutes and several GB, and the node should still log progress while it
+    runs.
     """
 
     def __init__(self, cfg: Config, log):
@@ -235,7 +235,7 @@ class RuntimeManager:
                     f"{engine} finished installing but the package is still missing"
                 )
             self._emit(f"{engine} is ready ({state.version})")
-        except Exception as exc:  # surfaced in the dashboard
+        except Exception as exc:  # surfaced in the install log
             message = one_line(str(exc), 500)
             self._errors[engine] = message
             self._emit(f"install failed: {message}")

@@ -12,8 +12,8 @@ _cache: tuple[float, list[dict[str, Any]]] = (0.0, [])
 def gpus(max_age: float = 2.0) -> list[dict[str, Any]]:
     """Return one record per visible GPU, using nvidia-smi.
 
-    Cached briefly because the dashboard polls. Returns an empty list on a
-    machine without NVIDIA tooling (e.g. local development).
+    Cached briefly because the idle watchdog and startup log both sample it.
+    Returns an empty list on a machine without NVIDIA tooling.
     """
     global _cache
     stamp, cached = _cache
