@@ -65,7 +65,7 @@ def test_llamacpp_command_uses_the_gguf_and_jinja(tmp_path) -> None:
     (weights / "mmproj-F16.gguf").write_bytes(b"x" * 8)
     draft = weights / "draft"
     draft.mkdir()
-    (draft / "Qwen3.8-27B-DSpark-Q8_0.gguf").write_bytes(b"y" * 16)
+    (draft / "Qwen3.8-27B-DFlash2-Q4_K_M.gguf").write_bytes(b"y" * 16)
 
     spec = next(s for s in PRESETS if s.key == "qwen3.8-27b-gguf")
     argv = build_argv(spec, str(weights), 8001, state_dir=state)
@@ -75,9 +75,9 @@ def test_llamacpp_command_uses_the_gguf_and_jinja(tmp_path) -> None:
     assert argv[argv.index("--mmproj") + 1] == str(weights / "mmproj-F16.gguf")
     # The drafter lives in its own subdirectory and must never be mistaken for
     # the target weights.
-    assert argv[argv.index("--model-draft") + 1] == str(draft / "Qwen3.8-27B-DSpark-Q8_0.gguf")
-    assert argv[argv.index("--spec-type") + 1] == "draft-dspark"
-    assert argv[argv.index("--spec-draft-n-max") + 1] == "7"
+    assert argv[argv.index("--model-draft") + 1] == str(draft / "Qwen3.8-27B-DFlash2-Q4_K_M.gguf")
+    assert argv[argv.index("--spec-type") + 1] == "draft-dflash"
+    assert argv[argv.index("--spec-draft-n-max") + 1] == "4"
     assert argv[argv.index("--spec-draft-ngl") + 1] == "999"
     assert argv[argv.index("--ctx-size") + 1] == "131072"
     assert argv[argv.index("--tensor-split") + 1] == "1,1"

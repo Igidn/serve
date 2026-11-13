@@ -13,7 +13,7 @@ pi agent harness ── HTTP ──▶ 192.168.1.142:8080   (Pi, local network)
                                     │
                              llama-server :8001
                                     │
-                         Qwen3.8 27B GGUF (IQ3_S · DSpark)
+                         Qwen3.8 27B GGUF (IQ3_S · DFlash2)
 ```
 
 The Kaggle kernel has no public port and no dashboard. On boot it installs
@@ -70,9 +70,9 @@ dependencies, and runs `python -m serve.main`. It automatically:
 
 1. installs the pinned llama.cpp CUDA build,
 2. downloads `ISTA-DASLab/Qwen3.8-27B-GSQ-RCO-GGUF` (`IQ3_S` + `mmproj`)
-   and the 1.4B DSpark drafter from `erlidev/Qwen3.8-27B-DSpark-GGUF`,
+   and the 1.9B DFlash2 drafter from `z-lab/Qwen3.8-27B-DFlash2-GGUF`,
 3. starts `llama-server` on `127.0.0.1:8001` with both T4s and drafting
-   through DSpark (`--spec-type draft-dspark`),
+   through DFlash2 (`--spec-type draft-dflash`),
 4. warms the model once,
 5. connects to the Pi relay and starts serving.
 

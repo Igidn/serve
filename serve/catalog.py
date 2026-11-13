@@ -86,11 +86,11 @@ def _t4_chat(**kwargs) -> ModelSpec:
 PRESETS: tuple[ModelSpec, ...] = (
     ModelSpec(
         key="qwen3.8-27b-gguf",
-        label="Qwen3.8 27B (GSQ-RCO IQ3_S + DSpark)",
+        label="Qwen3.8 27B (GSQ-RCO IQ3_S + DFlash2)",
         repo="ISTA-DASLab/Qwen3.8-27B-GSQ-RCO-GGUF",
         kind="chat",
         engine="llamacpp",
-        size_gb=14.16,
+        size_gb=13.9,
         min_vram_gb=24.0,
         tensor_parallel=2,
         dtype=None,
@@ -103,17 +103,20 @@ PRESETS: tuple[ModelSpec, ...] = (
             "Qwen3.8-27B-GSQ-RCO-IQ3_S.gguf",
             "mmproj-Qwen3.8-27B-BF16.gguf",
         ],
-        # A separate 1.4B drafter, not the target's own MTP head: DSpark reads
-        # the target's hidden states and emits a block of drafts per pass.
-        draft_repo="erlidev/Qwen3.8-27B-DSpark-GGUF",
-        draft_files=["Qwen3.8-27B-DSpark-Q8_0.gguf"],
+        # A separate 1.9B block-diffusion drafter (DFlash2) beats DSpark on
+        # this stack: ~20 tps vs ~11 tps baseline on two T4s, at ~0.7 draft
+        # acceptance with block size 4.
+        draft_repo="z-lab/Qwen3.8-27B-DFlash2-GGUF",
+        draft_files=["Qwen3.8-27B-DFlash2-Q4_K_M.gguf"],
         extra_args=[
             "--spec-type",
-            "draft-dspark",
-            # The checkpoint's serving block size is 7 (it was trained at 16);
-            # llama.cpp clamps this to what the draft was built for.
+            "draft-dflash",
+            # Draft block size 4: the sweet spot on two T4s. Longer blocks (7)
+            # draft more per pass but accept fewer, so short blocks net higher
+            # decode throughput; llama.cpp clamps n_max to the draft's trained
+            # block size (8 here), so 4 is safe.
             "--spec-draft-n-max",
-            "7",
+            "4",
             # Both sides must be on the GPUs. A draft left on CPU cannot keep
             # up with a 27B target and the speedup disappears.
             "--spec-draft-ngl",
@@ -124,16 +127,17 @@ PRESETS: tuple[ModelSpec, ...] = (
             "at 3.50 bpw it reproduces the BF16 model on AIME25 and "
             "LiveCodeBench v6, and the target plus projector is 12.7 GB, which "
             "is 4.8 GB less than the UD Q4_K_M it replaces. Speed comes from "
-            "DSpark, a 1.4B block-diffusion drafter converted for llama.cpp: "
-            "its card measures 1.7 to 2.5x decode on one 4090D with a Q4_K_M "
-            "target, best on math and worst on competitive code. The drafter "
-            "adds ~1.5 GB of weights, so the whole set is 14.2 GB and there is "
-            "still disk headroom; watch VRAM and the acceptance rate in the "
-            "engine log, and drop the --spec flags if acceptance falls below "
-            "~40%, where drafting costs more than it saves. Vision still "
-            "works: the mmproj is the BF16 projector from the same repo. Chat "
-            "template and tool calls come from the GGUF metadata via --jinja; "
-            "the KV cache is f16 so a 128k context fits."
+            "DFlash2, a 1.9B block-diffusion drafter converted for llama.cpp: "
+            "on two T4s it raises decode from ~11 tps baseline to ~20 tps "
+            "(~1.85x) with ~0.7 draft acceptance at block size 4, best on "
+            "math/code and acceptable on prose. The drafter adds ~1.1 GB of "
+            "weights, so the whole set is 13.9 GB and there is still disk "
+            "headroom; watch VRAM and the acceptance rate in the engine log, "
+            "and drop the --spec flags if acceptance falls below ~40%, where "
+            "drafting costs more than it saves. Vision still works: the mmproj "
+            "is the BF16 projector from the same repo. Chat template and tool "
+            "calls come from the GGUF metadata via --jinja; the KV cache is "
+            "f16 so a 128k context fits."
         ),
     ),
     _t4_chat(
