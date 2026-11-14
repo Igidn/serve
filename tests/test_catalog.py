@@ -78,8 +78,12 @@ def test_llamacpp_command_uses_the_gguf_and_jinja(tmp_path) -> None:
     assert argv[argv.index("--model-draft") + 1] == str(draft / "Qwen3.8-27B-DFlash2-Q4_K_M.gguf")
     assert argv[argv.index("--spec-type") + 1] == "draft-dflash"
     assert argv[argv.index("--spec-draft-n-max") + 1] == "4"
+    # The target samples at temp > 0, so the drafter samples too and the
+    # target verifies by rejection instead of only matching an argmax.
+    assert argv[argv.index("--spec-draft-sampling") + 1] == "probabilistic"
     assert argv[argv.index("--spec-draft-ngl") + 1] == "999"
     assert argv[argv.index("--ctx-size") + 1] == "131072"
+    assert argv[argv.index("--split-mode") + 1] == "layer"
     assert argv[argv.index("--tensor-split") + 1] == "1,1"
     assert argv[argv.index("--alias") + 1] == "qwen3.8-27b-gguf"
     assert argv[argv.index("--reasoning") + 1] == "on"
@@ -89,6 +93,62 @@ def test_llamacpp_command_uses_the_gguf_and_jinja(tmp_path) -> None:
     assert argv[argv.index("--cache-type-k") + 1] == "f16"
     assert "--jinja" in argv
     assert "--served-model-name" not in argv
+
+
+def test_mtp_preset_uses_the_native_head_and_tensor_split(tmp_path) -> None:
+    state = tmp_path / "serve-state"
+    binary = state / "runtime" / "llamacpp" / "b12318" / "build" / "bin" / "llama-server"
+    binary.parent.mkdir(parents=True)
+    binary.write_text("#!/bin/sh\n")
+    binary.chmod(0o755)
+
+    weights = tmp_path / "weights"
+    weights.mkdir()
+    (weights / "Qwen3.8-27B-GSQ-RCO-IQ3_S-mtp.gguf").write_bytes(b"x" * 64)
+    (weights / "mmproj-Qwen3.8-27B-BF16.gguf").write_bytes(b"x" * 8)
+
+    spec = next(s for s in PRESETS if s.key == "qwen3.8-27b-mtp")
+    argv = build_argv(spec, str(weights), 8001, state_dir=state)
+
+    assert argv[argv.index("--model") + 1] == str(
+        weights / "Qwen3.8-27B-GSQ-RCO-IQ3_S-mtp.gguf"
+    )
+    assert argv[argv.index("--spec-type") + 1] == "draft-mtp"
+    assert argv[argv.index("--spec-draft-n-max") + 1] == "2"
+    # MTP lives in the target context, so there is no drafter to load.
+    assert "--model-draft" not in argv
+    assert argv[argv.index("--split-mode") + 1] == "tensor"
+    assert argv[argv.index("--tensor-split") + 1] == "1,1"
+    assert argv[argv.index("--ctx-size") + 1] == "131072"
+
+
+def test_spec_env_overrides_replace_preset_flags(monkeypatch, tmp_path) -> None:
+    state = tmp_path / "serve-state"
+    binary = state / "runtime" / "llamacpp" / "b12318" / "build" / "bin" / "llama-server"
+    binary.parent.mkdir(parents=True)
+    binary.write_text("#!/bin/sh\n")
+    binary.chmod(0o755)
+
+    weights = tmp_path / "weights"
+    weights.mkdir()
+    (weights / "model.gguf").write_bytes(b"x" * 64)
+    draft = weights / "draft"
+    draft.mkdir()
+    (draft / "drafter.gguf").write_bytes(b"y" * 16)
+
+    monkeypatch.setenv("SERVE_SPEC_N_MAX", "2")
+    monkeypatch.setenv("SERVE_SPEC_SAMPLING", "greedy")
+    monkeypatch.setenv("SERVE_SPLIT_MODE", "tensor")
+
+    spec = next(s for s in PRESETS if s.key == "qwen3.8-27b-gguf")
+    argv = build_argv(spec, str(weights), 8001, state_dir=state)
+
+    assert argv.count("--spec-draft-n-max") == 1
+    assert argv[argv.index("--spec-draft-n-max") + 1] == "2"
+    assert argv.count("--spec-draft-sampling") == 1
+    assert argv[argv.index("--spec-draft-sampling") + 1] == "greedy"
+    assert argv.count("--split-mode") == 1
+    assert argv[argv.index("--split-mode") + 1] == "tensor"
 
 
 def test_llamacpp_refuses_to_start_without_its_drafter(tmp_path) -> None:

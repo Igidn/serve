@@ -72,9 +72,17 @@ dependencies, and runs `python -m serve.main`. It automatically:
 2. downloads `ISTA-DASLab/Qwen3.8-27B-GSQ-RCO-GGUF` (`IQ3_S` + `mmproj`)
    and the 1.9B DFlash2 drafter from `z-lab/Qwen3.8-27B-DFlash2-GGUF`,
 3. starts `llama-server` on `127.0.0.1:8001` with both T4s and drafting
-   through DFlash2 (`--spec-type draft-dflash`),
+   through DFlash2 (`--spec-type draft-dflash`), sampling the draft
+   probabilistically so rejection sampling can accept what greedy drafting
+   misses at the server's default temperature,
 4. warms the model once,
 5. connects to the Pi relay and starts serving.
+
+`SERVE_MODEL=qwen3.8-27b-mtp` swaps step 2–3 for the `-mtp` build of the same
+weights. That serves the model's native MTP head with `--split-mode tensor`,
+which DFlash2 cannot use because its drafter shares `output.weight` with the
+target. The two presets use different ~12 GB downloads, so unload and delete
+one before switching.
 
 No dataset is attached and no model needs to be uploaded to Kaggle. After an
 idle timeout it tears down the engine and ends the run so GPU time stops.
@@ -90,6 +98,12 @@ idle timeout it tears down the engine and ends the run so GPU time stops.
 | `SERVE_ENGINE_PORT` | `8001` | Kaggle |
 | `SERVE_LLAMACPP_BUILD` | `b12318` | Kaggle |
 | `SERVE_LLAMACPP_CUDA` | `cuda-12.8` | Kaggle |
+| `SERVE_SPEC_N_MAX` | preset | Kaggle |
+| `SERVE_SPEC_N_MIN` | preset | Kaggle |
+| `SERVE_SPEC_P_MIN` | preset | Kaggle |
+| `SERVE_SPEC_SAMPLING` | preset | Kaggle |
+| `SERVE_SPLIT_MODE` | preset | Kaggle |
+| `SERVE_TENSOR_SPLIT` | preset | Kaggle |
 | `SERVE_PI_HTTP_HOST` | `0.0.0.0` | Pi |
 | `SERVE_PI_HTTP_PORT` | `8080` | Pi |
 | `SERVE_PI_WS_HOST` | `0.0.0.0` | Pi |
@@ -100,6 +114,15 @@ idle timeout it tears down the engine and ends the run so GPU time stops.
 
 `SERVE_RELAY_TOKEN` is optional. It protects the public WebSocket from someone
 who finds the opentunnel URL. It is not the harness API key.
+
+`SERVE_SPEC_*` and `SERVE_SPLIT_MODE`/`SERVE_TENSOR_SPLIT` rewrite the selected
+preset's `llama-server` flags, which is how the speculative settings get A/B'd
+on the Kaggle node without a code push. Acceptable values are the ones
+`llama-server` takes: `SERVE_SPEC_SAMPLING` is `greedy` or `probabilistic`,
+`SERVE_SPLIT_MODE` is `layer`, `tensor`, `row` or `none`. `SERVE_TENSOR_SPLIT`
+is a comma list such as `1,1`. Watch the per-request `draft acceptance` and
+`mean len` lines in `engine.log`; DFlash2 is only worth keeping above roughly
+40% acceptance.
 
 ## Layout
 

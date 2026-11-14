@@ -29,6 +29,11 @@ class ModelSpec:
     engine: str
     size_gb: float = 0.0
     tensor_parallel: int = 1
+    # llama.cpp multi-GPU strategy. "layer" pipelines layers (lowest PCIe
+    # traffic, but every token still visits both cards); "tensor" splits each
+    # weight and runs the cards in parallel. DFlash's shared output.weight
+    # cannot be tensor-split in this build, so only use "tensor" with MTP.
+    split_mode: str = "layer"
     dtype: str | None = "float16"
     max_model_len: int | None = None
     gpu_memory_utilization: float | None = None
@@ -61,6 +66,8 @@ class ModelSpec:
             raise ValueError("draft_repo must look like 'owner/name'")
         if not 1 <= self.tensor_parallel <= 8:
             raise ValueError("tensor_parallel must be between 1 and 8")
+        if self.split_mode not in {"none", "layer", "row", "tensor"}:
+            raise ValueError("split_mode must be none, layer, row or tensor")
         return self
 
     def to_dict(self) -> dict:
@@ -117,6 +124,13 @@ PRESETS: tuple[ModelSpec, ...] = (
             # block size (8 here), so 4 is safe.
             "--spec-draft-n-max",
             "4",
+            # The target samples at the server default temperature (0.8) while
+            # greedy drafting takes the drafter's argmax. Rejection sampling
+            # against the target's distribution recovers the acceptance that
+            # greedy loses on prose, and stays exactly lossless. At temp 0
+            # (warmup) llama.cpp keeps drafting greedily.
+            "--spec-draft-sampling",
+            "probabilistic",
             # Both sides must be on the GPUs. A draft left on CPU cannot keep
             # up with a 27B target and the speedup disappears.
             "--spec-draft-ngl",
@@ -134,10 +148,63 @@ PRESETS: tuple[ModelSpec, ...] = (
             "weights, so the whole set is 13.9 GB and there is still disk "
             "headroom; watch VRAM and the acceptance rate in the engine log, "
             "and drop the --spec flags if acceptance falls below ~40%, where "
-            "drafting costs more than it saves. Vision still works: the mmproj "
-            "is the BF16 projector from the same repo. Chat template and tool "
-            "calls come from the GGUF metadata via --jinja; the KV cache is "
-            "f16 so a 128k context fits."
+            "drafting costs more than it saves. Because the harness leaves the "
+            "temperature at the server default, the draft samples "
+            "probabilistically and the target verifies by rejection: that is "
+            "free on quality and accepts more than an argmax draft would. If "
+            "acceptance on long agent transcripts stays low, the MTP preset "
+            "(SERVE_MODEL=qwen3.8-27b-mtp) trades the separate drafter for the "
+            "model's own head and can tensor-split both T4s. Vision still "
+            "works: the mmproj is the BF16 projector from the same repo. Chat "
+            "template and tool calls come from the GGUF metadata via --jinja; "
+            "the KV cache is f16 so a 128k context fits."
+        ),
+    ),
+    ModelSpec(
+        key="qwen3.8-27b-mtp",
+        label="Qwen3.8 27B (GSQ-RCO IQ3_S + native MTP)",
+        repo="ISTA-DASLab/Qwen3.8-27B-GSQ-RCO-GGUF",
+        kind="chat",
+        engine="llamacpp",
+        size_gb=13.1,
+        min_vram_gb=24.0,
+        tensor_parallel=2,
+        # Tensor split keeps both cards busy on every token instead of
+        # relaying the activations card-to-card layer by layer. MTP needs no
+        # separate draft weights, so unlike DFlash there is nothing to break
+        # the split on.
+        split_mode="tensor",
+        dtype=None,
+        max_model_len=131072,
+        # The "-mtp" build is the same IQ3_S weights plus the model's own
+        # 0.35 GB Multi-Token Prediction head. llama.cpp reads that head from
+        # the target file itself, so there is no drafter download.
+        files=[
+            "Qwen3.8-27B-GSQ-RCO-IQ3_S-mtp.gguf",
+            "mmproj-Qwen3.8-27B-BF16.gguf",
+        ],
+        extra_args=[
+            "--spec-type",
+            "draft-mtp",
+            # MTP's head is one layer, and on a constrained split short
+            # drafts win: two tokens per pass verifies in one target step.
+            "--spec-draft-n-max",
+            "2",
+        ],
+        notes=(
+            "Alternative to the DFlash2 preset, selected with "
+            "SERVE_MODEL=qwen3.8-27b-mtp. It serves the same task-lossless "
+            "IQ3_S weights from the same repo, but through the model's native "
+            "MTP head instead of a separate 1.9B drafter. Because MTP lives in "
+            "the target context, the two T4s can use --split-mode tensor, "
+            "which is not possible with DFlash2 (it shares output.weight and "
+            "the split fails). Reported results on two consumer cards put MTP "
+            "with tensor split well above DFlash with layer split; on the T4s "
+            "the gain is unmeasured, so A/B it against the default preset. "
+            "The -mtp file is a different 12.2 GB download, so delete the "
+            "other preset's files first: both do not fit the 20 GB working "
+            "disk together. Tune --spec-draft-n-max and the sampling mode "
+            "with the SERVE_SPEC_* variables without editing this file."
         ),
     ),
     _t4_chat(
@@ -415,6 +482,37 @@ def llamacpp_draft(source: Path) -> Path | None:
     return max(files, key=lambda p: p.stat().st_size) if files else None
 
 
+def _set_option(argv: list[str], flag: str, value: str) -> list[str]:
+    """Replace an option's value in place, or append it when it is absent."""
+    for i, token in enumerate(argv):
+        if token == flag and i + 1 < len(argv):
+            argv[i + 1] = value
+            return argv
+    argv += [flag, value]
+    return argv
+
+
+# Knobs worth A/B testing on a given pair of GPUs. They rewrite the preset's
+# argv instead of requiring an edit and a push, which matters because the only
+# place to measure them is the Kaggle node.
+_SPEC_ENV = {
+    "SERVE_SPEC_N_MAX": "--spec-draft-n-max",
+    "SERVE_SPEC_N_MIN": "--spec-draft-n-min",
+    "SERVE_SPEC_P_MIN": "--spec-draft-p-min",
+    "SERVE_SPEC_SAMPLING": "--spec-draft-sampling",
+    "SERVE_SPLIT_MODE": "--split-mode",
+    "SERVE_TENSOR_SPLIT": "--tensor-split",
+}
+
+
+def _apply_spec_env(argv: list[str]) -> list[str]:
+    for name, flag in _SPEC_ENV.items():
+        raw = os.environ.get(name)
+        if raw is not None and raw.strip() != "":
+            argv = _set_option(argv, flag, raw.strip())
+    return argv
+
+
 def _llamacpp_argv(
     spec: ModelSpec,
     source: str,
@@ -449,7 +547,7 @@ def _llamacpp_argv(
         "--n-gpu-layers",
         "999",
         "--split-mode",
-        "layer",
+        spec.split_mode,
     ]
     if spec.tensor_parallel > 1:
         argv += ["--tensor-split", ",".join(["1"] * spec.tensor_parallel)]
@@ -478,7 +576,7 @@ def _llamacpp_argv(
             )
         argv += ["--model-draft", str(draft_path)]
     argv += list(spec.extra_args)
-    return argv
+    return _apply_spec_env(argv)
 
 
 def build_argv(
